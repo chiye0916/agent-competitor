@@ -24,7 +24,7 @@
       "url": "https://example.test/alpha",
       "snippet": "Alpha offers collaborative editing, a free tier, and a Pro plan at $20/month. It targets small product teams.",
       "content": "Alpha offers collaborative editing, a free tier, and a Pro plan at $20/month. It targets small product teams.",
-      "retrieved_at": "2026-10-13T01:51:37+00:00",
+      "retrieved_at": "2026-10-13T03:23:27+00:00",
       "via": "read_web"
     },
     {
@@ -33,13 +33,13 @@
       "url": "https://example.test/beta",
       "snippet": "Beta emphasizes automation, enterprise controls, and usage-based pricing. Public pricing is not listed.",
       "content": "Beta emphasizes automation, enterprise controls, and usage-based pricing. Public pricing is not listed.",
-      "retrieved_at": "2026-10-13T01:51:37+00:00",
+      "retrieved_at": "2026-10-13T03:23:27+00:00",
       "via": "read_web"
     }
   ],
   "recent_events": [
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "round_start",
       "detail": {
         "round": 2,
@@ -70,7 +70,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "agent_decision",
       "detail": {
         "round": 2,
@@ -85,7 +85,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "progress_assessment",
       "detail": {
         "requested_step_ids": [
@@ -98,7 +98,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "tool_result",
       "detail": {
         "round": 2,
@@ -126,7 +126,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "round_start",
       "detail": {
         "round": 3,
@@ -157,7 +157,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "agent_decision",
       "detail": {
         "round": 3,
@@ -174,7 +174,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "tool_result",
       "detail": {
         "round": 3,
@@ -198,7 +198,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "round_start",
       "detail": {
         "round": 4,
@@ -229,7 +229,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "agent_decision",
       "detail": {
         "round": 4,
@@ -244,7 +244,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "progress_assessment",
       "detail": {
         "requested_step_ids": [],
@@ -253,7 +253,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "tool_result",
       "detail": {
         "round": 4,
@@ -284,7 +284,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "round_start",
       "detail": {
         "round": 5,
@@ -315,7 +315,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "agent_decision",
       "detail": {
         "round": 5,
@@ -330,7 +330,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "progress_assessment",
       "detail": {
         "requested_step_ids": [
@@ -343,7 +343,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "tool_result",
       "detail": {
         "round": 5,
@@ -372,7 +372,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "round_start",
       "detail": {
         "round": 6,
@@ -403,7 +403,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "agent_decision",
       "detail": {
         "round": 6,
@@ -419,7 +419,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "tool_result",
       "detail": {
         "round": 6,
@@ -443,7 +443,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "report_context_built",
       "detail": {
         "context_chars": 1459,
@@ -455,7 +455,7 @@
       }
     },
     {
-      "time": "2026-10-13T01:51:37+00:00",
+      "time": "2026-10-13T03:23:27+00:00",
       "event": "run_completed",
       "detail": {
         "report_path": "artifacts\\demo\\report.md",
@@ -480,6 +480,6 @@
   "replan_count": 1,
   "status": "completed",
   "report_path": "artifacts\\demo\\report.md",
-  "created_at": "2026-10-13T01:51:37+00:00",
-  "updated_at": "2026-10-13T01:51:37+00:00"
+  "created_at": "2026-10-13T03:23:26+00:00",
+  "updated_at": "2026-10-13T03:23:27+00:00"
 }

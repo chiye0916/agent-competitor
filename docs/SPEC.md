@@ -7,7 +7,7 @@
 - `main.py`：CLI 参数解析、依赖初始化和运行入口；
 - `agent/`：State、Context 构建和 Agent Loop；
 - `llm/`：模型后端协议、OpenAI API 实现和提示词；
-- `tools/`：Tool Schema、真实研究工具和离线 Demo；
+- `tools/`：统一 Tool 接口、Registry、输入 Schema、内置研究工具和离线 Demo；
 - `config/`：环境变量与运行配置；
 - `storage/`：JSONL 运行日志；
 - `tests/test_agent.py`：当前自动化测试覆盖范围；
@@ -30,7 +30,7 @@ LLM 每次只接收当前一轮构造出的 Context 并返回一次计划、动�
 1. 通过 CLI 接收一段竞品分析任务文本；
 2. 调用 LLM 将任务拆分成研究计划；
 3. 根据持久化 State 构造当前轮 Context；
-4. 让 LLM 从当前支持的 Action 中自主选择一个下一步动作；
+4. 由 Tool Registry 动态提供已注册工具的 Function Calling Schema，让 LLM 自主选择一个下一步动作；
 5. 通过 Tavily Search API 搜索网页候选来源；
 6. 通过内置 HTTP/HTML 读取器读取公开网页正文；
 7. 将计划、来源、轮数、近期事件和循环保护信息保存到 `state.json`；
@@ -39,6 +39,7 @@ LLM 每次只接收当前一轮构造出的 Context 并返回一次计划、动�
 10. 在模型选择 `finish` 后，基于独立的报告 Context 生成 Markdown 报告；
 11. 将完整事件流写入 `run.jsonl`，并在终端输出压缩日志；
 12. 使用已有 `state.json` 恢复执行。
+13. 在工具执行前根据统一的 `input_schema` 校验模型参数，非法调用记录为 `tool_error` 后继续运行。
 
 当前动作集合固定为：
 
@@ -46,6 +47,8 @@ LLM 每次只接收当前一轮构造出的 Context 并返回一次计划、动�
 - `read_web`
 - `replan`
 - `finish`
+
+这四个动作是 CLI 默认创建的 Registry 内容，不再是 `CompetitorAgent._execute()` 中的硬编码分支。代码可以仅通过实现 `BaseTool` 并调用 `registry.register()` 注册其他工具；当前默认 Agent 能力仍保持上述四项。
 
 分析步骤顺序、搜索词、待读取 URL、何时 Replan 和何时 Finish 在真实模式下由 LLM 根据 Context 决定；Runtime 不硬编码 Cursor、Claude Code、Codex 等具体产品的研究流程。
 
@@ -77,6 +80,7 @@ artifacts/<run>/
 - 使用 Python 实现运行控制。
 - 真实模式使用 OpenAI Python SDK 的 Chat Completions、JSON mode 和 function calling 接口。
 - 搜索工具目前只接入 Tavily。
+- Tool Framework 使用项目自身的 `BaseTool` 和 `ToolRegistry`，未引入第三方 Agent/Tool 框架。
 - 不使用 LangGraph、CrewAI、AutoGen 等成熟 Agent 编排框架。
 - 当前没有 Multi-Agent，也没有 Agent 间通信、角色分工或冲突协调。
 - 当前没有长期 Memory。

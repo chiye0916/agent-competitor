@@ -17,8 +17,8 @@
 3. 使用 `ContextBuilder` 构造每轮有限 Context；
 4. 调用 LLM 判断唯一的下一步 Action；
 5. 对搜索和读取 Action 做重复检测；
-6. 调用 `ResearchTools` 执行搜索或网页读取；
-7. 把工具结果转换成 Observation，并 Upsert 到 `sources`；
+6. 把 Registry 动态生成的 Tool Schema 交给 LLM；
+7. 调用 `ToolRegistry` 校验并执行模型选择的工具，接收其 Observation；
 8. 调用 LLM 评估哪些 PlanStep 可以完成；
 9. 执行模型主动 Replan 或重复保护触发的强制 Replan；
 10. 每轮更新并保存 State；
@@ -40,7 +40,7 @@ round += 1
     ↓
 ContextBuilder.build(state)
     ↓
-LLMBackend.decide(context, TOOL_SCHEMAS)
+LLMBackend.decide(context, tool_registry.schemas())
     ↓
 重复动作检查
     ↓
@@ -55,9 +55,17 @@ Continue / Finish / 达到 max_rounds
 
 每轮只允许模型选择一个工具调用。当前没有同轮并行工具调用。
 
+`CompetitorAgent._execute()` 不再按工具名包含执行分支，只调用：
+
+```python
+self.tool_registry.execute(action["name"], action["arguments"])
+```
+
+具体工具负责自己的执行和 State 更新逻辑。新增普通 Tool 不需要修改 `_execute()`。
+
 ## 4. Agent Decision
 
-真实模式下，`OpenAIBackend.decide()` 使用 function calling，并设置 `tool_choice="required"`。模型必须从以下四个 Action 中选择一个。
+真实模式下，`OpenAIBackend.decide()` 使用 function calling，并设置 `tool_choice="required"`。可用 Schema 由 `ToolRegistry` 根据已注册 Tool 动态生成。默认 Registry 注册以下四个 Action。
 
 ### 4.1 `search_web`
 
@@ -173,6 +181,8 @@ Finish 后的流程为：
 
 ## 10. Error Handling
 
+- `ToolRegistry` 会在执行前依据 Tool 的 `input_schema` 校验必填字段、字段类型、数组项和额外参数；
+- 非法参数或未知工具会进入 Agent 原有异常处理，记录为 `tool_error`，保存 State 后继续下一轮；
 - 搜索/网页读取/Replan/Finish 执行异常会记录为 `tool_error`，保存 State 后继续下一轮；
 - 进度审查异常会记录为 `progress_assessment_error`，本轮仍可保存工具结果；
 - 强制 Replan 异常会记录为 `forced_replan_error`；
