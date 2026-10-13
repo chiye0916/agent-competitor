@@ -13,7 +13,7 @@ from agent.context import ContextBuilder, ReportContextBuilder
 from agent.core import CompetitorAgent
 from agent.state import AgentState, PlanStep, Source
 from config.settings import Config
-from llm.backend import LLMBackend
+from llm.backend import LLMBackend, LLMResponseError
 from llm.openai_backend import OpenAIBackend
 from storage.logger import RunLogger, compact, utc_now
 from tools.base import BaseTool, ToolValidationError

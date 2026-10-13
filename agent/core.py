@@ -11,7 +11,7 @@ from typing import Any
 from agent.context import ContextBuilder, ReportContextBuilder
 from agent.state import AgentState, PlanStep
 from config.settings import Config
-from llm.backend import LLMBackend
+from llm.backend import LLMBackend, LLMResponseError
 from storage.logger import RunLogger
 from tools.registry import ToolRegistry
 
@@ -169,7 +169,21 @@ class CompetitorAgent:
                 current_step=pending[0] if pending else None,
                 context_chars=len(json.dumps(context, ensure_ascii=False)),
             )
-            action = self.llm.decide(context, self.tool_registry.schemas())
+            try:
+                action = self.llm.decide(context, self.tool_registry.schemas())
+            except LLMResponseError as exc:
+                self._record(
+                    "decision_error",
+                    round=self.state.round,
+                    error=str(exc),
+                    attempts=exc.attempts,
+                    tool_name=exc.tool_name,
+                    raw_arguments_length=exc.raw_arguments_length,
+                    raw_arguments_preview=exc.raw_arguments_preview,
+                    error_position=exc.position,
+                )
+                self.state.save(self.state_path)
+                continue
             self._record("agent_decision", round=self.state.round, action=action)
             guard = self._register_action(action)
             if guard["duplicate"]:
@@ -180,14 +194,26 @@ class CompetitorAgent:
                     previous_count=guard["previous_count"],
                     repetition_strikes=guard["repetition_strikes"],
                 )
-            if guard["blocked"]:
-                reason = f"动作 {guard['signature']} 已执行至少 {self.MAX_SAME_ACTIONS} 次，拒绝再次执行"
+            repetition_threshold_reached = (
+                guard["duplicate"]
+                and guard["repetition_strikes"] >= self.REPLAN_REPETITION_THRESHOLD
+            )
+            if guard["blocked"] or repetition_threshold_reached:
+                if guard["blocked"]:
+                    reason = (
+                        f"动作 {guard['signature']} 已执行至少 {self.MAX_SAME_ACTIONS} 次，"
+                        "拒绝再次执行"
+                    )
+                else:
+                    reason = (
+                        f"累计检测到 {guard['repetition_strikes']} 次重复动作，"
+                        f"拒绝再次执行 {guard['signature']}"
+                    )
                 self._record("action_blocked", round=self.state.round, reason=reason)
-                if self.state.repetition_strikes >= self.REPLAN_REPETITION_THRESHOLD:
-                    try:
-                        self._force_replan(reason)
-                    except Exception as exc:
-                        self._record("forced_replan_error", round=self.state.round, error=str(exc))
+                try:
+                    self._force_replan(reason)
+                except Exception as exc:
+                    self._record("forced_replan_error", round=self.state.round, error=str(exc))
                 self.state.save(self.state_path)
                 continue
             try:

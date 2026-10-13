@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from main import (
@@ -12,6 +13,8 @@ from main import (
     ContextBuilder,
     DemoLLMBackend,
     DemoResearchTools,
+    LLMResponseError,
+    OpenAIBackend,
     PlanStep,
     ReportContextBuilder,
     ResearchTools,
@@ -107,6 +110,70 @@ class InvalidThenRecoverLLM(DemoLLMBackend):
 
     def write_report(self, context):
         return "# 参数校验恢复测试\n\n已恢复并完成 [S1]。"
+
+
+class DecisionErrorThenRecoverLLM(DemoLLMBackend):
+    def create_plan(self, task):
+        return ["收集来源"]
+
+    def decide(self, context, tools):
+        if context["progress"]["round"] == 1:
+            raise LLMResponseError(
+                "工具参数不是合法 JSON",
+                attempts=3,
+                tool_name="search_web",
+                raw_arguments='{"query":"broken" "purpose":"missing comma"}',
+                position=18,
+            )
+        if context["progress"]["round"] == 2:
+            return {
+                "name": "search_web",
+                "arguments": {
+                    "query": "Alpha official pricing",
+                    "purpose": "恢复后搜索",
+                    "target_step_id": "P1",
+                },
+            }
+        return {
+            "name": "finish",
+            "arguments": {"reason": "验证决策恢复", "completed_step_ids": ["P1"]},
+        }
+
+
+class DistinctRepeatingLLM(DemoLLMBackend):
+    def __init__(self):
+        self.revise_calls = 0
+
+    def create_plan(self, task):
+        return ["读取目标页面"]
+
+    def decide(self, context, tools):
+        actions = {
+            1: "https://example.test/alpha",
+            2: "https://example.test/beta",
+            3: "https://example.test/alpha",
+            4: "https://example.test/beta",
+        }
+        if context["progress"]["round"] in actions:
+            return {
+                "name": "read_web",
+                "arguments": {
+                    "url": actions[context["progress"]["round"]],
+                    "purpose": "累计重复测试",
+                    "target_step_id": "P1",
+                },
+            }
+        return {
+            "name": "finish",
+            "arguments": {"reason": "累计重复保护已生效", "completed_step_ids": ["R1-1"]},
+        }
+
+    def assess_progress(self, context, observation):
+        return {"completed_step_ids": [], "reason": "保留 pending 以测试累计重复保护"}
+
+    def revise_plan(self, context, reason):
+        self.revise_calls += 1
+        return ["使用已有证据完成分析"]
 
 
 class CalculatorTool(BaseTool):
@@ -238,6 +305,7 @@ class AgentTests(unittest.TestCase):
 
         schema = registry.schemas()[0]
         self.assertEqual(schema["function"]["name"], "calculator")
+        self.assertTrue(schema["function"]["strict"])
         self.assertEqual(registry.execute("calculator", {"left": 2, "right": 3}), (False, 5))
         with self.assertRaises(ToolValidationError):
             registry.execute("calculator", {"left": 2})
@@ -268,6 +336,115 @@ class AgentTests(unittest.TestCase):
             self.assertIn("缺少必填参数", errors[0]["error"])
             self.assertEqual(agent.state.status, "completed")
             self.assertEqual(agent.state.round, 3)
+
+    def test_decision_response_error_is_logged_and_agent_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            config = Config(max_rounds=3)
+            state = AgentState(task="decision response recovery")
+            registry = build_default_registry(DemoResearchTools(config), state)
+            agent = CompetitorAgent(
+                DecisionErrorThenRecoverLLM(),
+                registry,
+                config,
+                run_dir,
+                state,
+                echo_logs=False,
+            )
+
+            agent.run()
+
+            records = [
+                json.loads(line)
+                for line in (run_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            errors = [record for record in records if record["event"] == "decision_error"]
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["attempts"], 3)
+            self.assertEqual(errors[0]["tool_name"], "search_web")
+            self.assertEqual(errors[0]["error_position"], 18)
+            self.assertEqual(agent.state.status, "completed")
+            self.assertEqual(agent.state.round, 3)
+
+    def test_distinct_duplicate_actions_trigger_cumulative_replan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            config = Config(max_rounds=5)
+            backend = DistinctRepeatingLLM()
+            state = AgentState(task="cumulative repeat guard")
+            registry = build_default_registry(DemoResearchTools(config), state)
+            agent = CompetitorAgent(
+                backend,
+                registry,
+                config,
+                run_dir,
+                state,
+                echo_logs=False,
+            )
+
+            agent.run()
+
+            records = [
+                json.loads(line)
+                for line in (run_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            blocked = [record for record in records if record["event"] == "action_blocked"]
+            self.assertEqual(backend.revise_calls, 1)
+            self.assertEqual(len(blocked), 1)
+            self.assertIn("累计检测到 2 次重复动作", blocked[0]["reason"])
+            self.assertEqual(agent.state.replan_count, 1)
+
+    def test_openai_backend_retries_malformed_tool_arguments(self):
+        responses = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[SimpleNamespace(
+                    function=SimpleNamespace(name="search_web", arguments='{"query":"x" "purpose":"y"}')
+                )]))]
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[SimpleNamespace(
+                    function=SimpleNamespace(
+                        name="search_web",
+                        arguments=json.dumps(
+                            {"query": "x", "purpose": "y", "target_step_id": "P1"}
+                        ),
+                    )
+                )]))]
+            ),
+        ]
+        create = unittest.mock.Mock(side_effect=responses)
+        backend = OpenAIBackend.__new__(OpenAIBackend)
+        backend.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        backend.model = "test-model"
+        backend.decision_max_retries = 2
+
+        action = backend.decide({"task": "test"}, [])
+
+        self.assertEqual(action["name"], "search_web")
+        self.assertEqual(action["arguments"]["target_step_id"], "P1")
+        self.assertEqual(create.call_count, 2)
+        retry_messages = create.call_args_list[1].kwargs["messages"]
+        self.assertIn("不是合法 JSON", retry_messages[-1]["content"])
+
+    def test_openai_backend_raises_diagnostic_error_after_retry_limit(self):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[SimpleNamespace(
+                function=SimpleNamespace(name="read_web", arguments='{"url":"x" "purpose":"y"}')
+            )]))]
+        )
+        create = unittest.mock.Mock(return_value=response)
+        backend = OpenAIBackend.__new__(OpenAIBackend)
+        backend.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        backend.model = "test-model"
+        backend.decision_max_retries = 1
+
+        with self.assertRaises(LLMResponseError) as raised:
+            backend.decide({"task": "test"}, [])
+
+        self.assertEqual(raised.exception.attempts, 2)
+        self.assertEqual(raised.exception.tool_name, "read_web")
+        self.assertGreater(raised.exception.raw_arguments_length, 0)
+        self.assertIsNotNone(raised.exception.position)
 
     def test_old_state_without_guard_fields_still_loads(self):
         old = {"task": "old", "plan": [], "sources": [], "recent_events": []}

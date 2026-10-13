@@ -13,8 +13,10 @@ flowchart TD
     CLI --> A[CompetitorAgent<br/>Agent Runtime]
     A <--> S[(AgentState<br/>state.json)]
     S --> C[ContextBuilder]
-    C --> L[OpenAIBackend<br/>无状态 LLM 调用]
+    C --> L[OpenAIBackend<br/>无状态 LLM 调用 + 决策解析重试]
     L --> D{Action Decision}
+    L -->|非法 Tool JSON 且重试耗尽| DE[decision_error<br/>保存 State 后进入下一轮]
+    DE --> S
     D --> TR[ToolRegistry<br/>校验 + 分发]
     TR -->|search_web| SW[SearchWebTool<br/>Tavily API]
     TR -->|read_web| RW[ReadWebTool<br/>HTTP + HTMLParser]
@@ -82,12 +84,12 @@ competitor-agent/
 | 文件 | 类/对象 | 当前职责 |
 |---|---|---|
 | `main.py` | `parse_args`、`main` | 解析 CLI、创建 Config/LLM/ResearchTools/ToolRegistry/State/Agent 并调用 `run()`；同时转发旧版公开导入名称 |
-| `config/settings.py` | `Config` | 从 `.env` 读取模型、API Key、轮数、Context 预算和 HTTP 超时 |
+| `config/settings.py` | `Config` | 从 `.env` 读取模型、API Key、决策重试次数、轮数、Context 预算和 HTTP 超时 |
 | `agent/state.py` | `PlanStep`、`Source`、`AgentState` | 保存计划步骤、来源和最新可恢复状态，并负责 JSON 序列化 |
 | `agent/context.py` | `ContextBuilder`、`ReportContextBuilder` | 将 State 转换为有限决策 Context 或较丰富的报告 Context，不调用 LLM |
 | `agent/core.py` | `CompetitorAgent` | 编排组件，通过 Registry 执行 Action，保持原有 Agent Loop、状态持久化和报告落盘 |
-| `llm/backend.py` | `LLMBackend` | 规定 Planning、Decision、Progress、Replan、Report 五类 LLM 能力接口 |
-| `llm/openai_backend.py` | `OpenAIBackend` | 使用 OpenAI SDK Chat Completions 实现 `LLMBackend` |
+| `llm/backend.py` | `LLMBackend`、`LLMResponseError` | 规定五类 LLM 能力接口，并提供可恢复响应格式错误类型 |
+| `llm/openai_backend.py` | `OpenAIBackend` | 使用 OpenAI SDK Chat Completions 实现 `LLMBackend`；对缺失 Tool Call 或非法参数 JSON 做有限重试 |
 | `llm/prompts.py` | 提示词常量 | 集中保存 OpenAI 后端使用的五类提示词 |
 | `tools/base.py` | `BaseTool`、`ToolValidationError` | 定义统一 Tool 接口、生成单个 Function Schema 并执行轻量输入校验 |
 | `tools/registry.py` | `ToolRegistry`、`build_default_registry` | 注册 Tool、动态汇总 Schema、校验并分发执行；组装四个默认工具 |
@@ -187,7 +189,9 @@ stateDiagram-v2
 }
 ```
 
-`CompetitorAgent._execute()` 只把 `name` 和 `arguments` 交给 `ToolRegistry.execute()`。Registry 查找工具、根据同一 Tool 的 `input_schema` 校验参数，再调用 `tool.execute(**arguments)`。Tool 只返回自身 Observation；Registry 根据 Tool 的 `ends_run` 元数据统一返回 `(ends_run, observation)`，默认只有 `FinishTool` 将其设为 `True`。非法参数或未知名称会由 Agent 原有错误路径记录为 `tool_error`，不会终止整个循环。
+`CompetitorAgent._execute()` 只把 `name` 和 `arguments` 交给 `ToolRegistry.execute()`。Registry 查找工具、根据同一 Tool 的 `input_schema` 校验参数，再调用 `tool.execute(**arguments)`。Tool 只返回自身 Observation；Registry 根据 Tool 的 `ends_run` 元数据统一返回 `(ends_run, observation)`，默认只有 `FinishTool` 将其设为 `True`。Function Schema 声明 `strict: true`，同时仍保留 Runtime 校验。非法参数或未知名称会由 Agent 原有错误路径记录为 `tool_error`，不会终止整个循环。
+
+如果模型返回的 `function.arguments` 不是合法 JSON，`OpenAIBackend` 会在请求中加入格式纠正提示后重试。默认允许 2 次额外重试；全部失败后抛出 `LLMResponseError`。Runtime 将其记录为 `decision_error`，日志只保存参数长度及最多 600 字符的首尾摘要，随后保存 State 并进入下一轮。该异常发生在 Registry 之前，不属于 `tool_error`。
 
 默认 Registry 注册 `SearchWebTool`、`ReadWebTool`、`ReplanTool` 和 `FinishTool`。新增普通工具只需继承 `BaseTool` 并注册，不需要修改 Agent 的执行分发代码。当前没有自动插件发现或 MCP 连接生命周期管理。
 
@@ -233,7 +237,7 @@ sequenceDiagram
 
 ### 10.2 重复动作保护触发
 
-搜索查询经小写和空白规范化，读取 URL 去掉 fragment、尾部斜杠并小写。相同签名最多实际执行 2 次；第三次会被阻止。累计重复计数达到 2 后，Runtime 调用 `revise_plan()` 生成替代未完成步骤。
+搜索查询经小写和空白规范化，读取 URL 去掉 fragment、尾部斜杠并小写。相同签名最多实际执行 2 次；第三次会被阻止。不同签名的重复也会累计 `repetition_strikes`：当尚未取得新步骤进展且累计达到 2 次时，当前重复动作即被阻止，Runtime 调用 `revise_plan()` 生成替代未完成步骤。步骤完成或 Replan 成功后计数清零。
 
 Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 Plan；变更历史保存在日志中。
 
@@ -258,6 +262,7 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 | 环境变量 | 默认值/作用 |
 |---|---|
 | `LLM_API_KEY` 或 `OPENAI_API_KEY` | 真实模式必需 |
+| `LLM_DECISION_RETRIES` | Tool Call 缺失或参数 JSON 非法时的额外重试次数，默认 2 |
 | `LLM_MODEL` | `gpt-4.1-mini` |
 | `LLM_BASE_URL` | 可选 OpenAI 兼容服务地址 |
 | `TAVILY_API_KEY` | 真实搜索必需 |

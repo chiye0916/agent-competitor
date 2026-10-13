@@ -218,3 +218,25 @@ Round 31 出现一次 `repeated_action_detected`，当时该签名此前计数�
 - 报告内容没有 LLM 判断错误。
 
 其中强制 Replan 路径只在自动化测试中通过 `RepeatingLLM` 验证，主动 Replan 路径在离线 Demo 中验证。
+
+## 5. 2026-10-13 真实运行故障与修复
+
+`artifacts/20261013-191144/run.jsonl` 记录了一次真实模式运行。Round 27 完成后已保存 54 个来源；Round 28 只记录了 `round_start`，随后 CLI 输出：
+
+```text
+Expecting ',' delimiter: line 1 column 1070 (char 1069)
+```
+
+该错误发生在 `OpenAIBackend.decide()` 解析 `function.arguments` 时。日志中没有 Round 28 的 `agent_decision` 或 `tool_error`，说明异常发生在 Tool Registry 接管之前。原实现直接调用 `json.loads()`，而 Decision 又位于工具异常处理之外，因此非法 JSON 终止了整次运行。持久化 State 仍停留在 Round 27、`status=running`，证据没有丢失。
+
+本次修复包括：
+
+- Decision 对缺失 Tool Call 或非法参数 JSON 默认额外重试 2 次；
+- 重试耗尽后记录 `decision_error`、保存 State 并进入下一轮；
+- 日志增加工具名、错误位置、重试次数、原始参数长度和截断摘要；
+- Function Schema 开启严格参数模式，Registry 的 Runtime 校验继续保留；
+- 累计两次重复动作即可阻止当前动作并强制 Replan，不再要求重复集中在同一个 URL；
+- Progress Prompt 明确以证据覆盖为完成条件，不要求先产生中间整合文本；
+- 本地真实运行的 `CONTEXT_CHAR_BUDGET` 从 80,000 恢复为默认 14,000，减少决策漂移和格式异常风险。
+
+自动化测试新增了非法 JSON 重试、重试耗尽诊断、Decision 跨轮恢复和不同 URL 累计重复触发 Replan 四类用例。

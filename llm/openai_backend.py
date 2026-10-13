@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from config.settings import Config
+from llm.backend import LLMResponseError
 from llm.prompts import (
     ASSESS_PROGRESS_PROMPT,
     CREATE_PLAN_PROMPT,
@@ -28,6 +29,7 @@ class OpenAIBackend:
             kwargs["base_url"] = config.base_url
         self.client = OpenAI(**kwargs)
         self.model = config.model
+        self.decision_max_retries = config.decision_max_retries
 
     def _json_completion(self, system: str, user: dict[str, Any]) -> dict[str, Any]:
         response = self.client.chat.completions.create(
@@ -49,21 +51,58 @@ class OpenAIBackend:
         return steps[:8]
 
     def decide(self, context: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": DECIDE_PROMPT},
-                {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-            ],
-            tools=tools,
-            tool_choice="required",
-            temperature=0,
-        )
-        calls = response.choices[0].message.tool_calls or []
-        if not calls:
-            raise RuntimeError("模型没有返回工具调用")
-        call = calls[0]
-        return {"name": call.function.name, "arguments": json.loads(call.function.arguments or "{}")}
+        base_messages = [
+            {"role": "system", "content": DECIDE_PROMPT},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+        ]
+        retry_note: str | None = None
+        total_attempts = self.decision_max_retries + 1
+        last_error: LLMResponseError | None = None
+
+        for attempt in range(1, total_attempts + 1):
+            messages = list(base_messages)
+            if retry_note:
+                messages.append({"role": "user", "content": retry_note})
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                tool_choice="required",
+                temperature=0,
+            )
+            calls = response.choices[0].message.tool_calls or []
+            if not calls:
+                last_error = LLMResponseError(
+                    "模型没有返回工具调用",
+                    attempts=attempt,
+                )
+                retry_note = "上一次响应没有工具调用。请重新选择一个工具，并返回严格符合 Schema 的参数。"
+                continue
+
+            call = calls[0]
+            tool_name = str(call.function.name)
+            raw_arguments = call.function.arguments or "{}"
+            try:
+                arguments = json.loads(raw_arguments)
+            except (json.JSONDecodeError, TypeError) as exc:
+                position = exc.pos if isinstance(exc, json.JSONDecodeError) else None
+                last_error = LLMResponseError(
+                    f"工具 {tool_name} 的参数不是合法 JSON: {exc}",
+                    attempts=attempt,
+                    tool_name=tool_name,
+                    raw_arguments=str(raw_arguments),
+                    position=position,
+                )
+                retry_note = (
+                    f"上一次为工具 {tool_name} 生成的参数不是合法 JSON。"
+                    "请重新选择一个工具，确保 arguments 是严格 JSON，字符串已正确转义且字段之间包含逗号。"
+                )
+                continue
+            return {"name": tool_name, "arguments": arguments}
+
+        if last_error is not None:
+            raise last_error
+        raise LLMResponseError("模型决策失败", attempts=total_attempts)
 
     def assess_progress(self, context: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
         return self._json_completion(
