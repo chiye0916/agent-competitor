@@ -2,7 +2,7 @@
 
 ## 1. Agent Role
 
-当前系统只有一个 Agent：`CompetitorAgent`。
+当前系统只有一个 Agent：`CompetitorAgent`，实现位于 `agent/core.py`。
 
 它的角色是竞品研究 Agent Runtime：接收任务状态，组织 LLM 调用和外部工具调用，持续更新 State，并在研究结束后生成报告。
 
@@ -29,7 +29,7 @@
 
 ## 3. Agent Loop
 
-核心循环位于 `CompetitorAgent.run()`：
+核心循环位于 `agent/core.py` 的 `CompetitorAgent.run()`：
 
 ```text
 Load/Create State
