@@ -2,7 +2,7 @@
 
 ## 1. 架构范围
 
-当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 只负责 CLI 参数解析和依赖装配。
+当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 只负责 CLI 参数解析和依赖装配。仓库另有独立的 Knowledge Layer、Embedding 接口和 Chroma 存储基础设施，但尚未连接到 Agent Runtime。
 
 ## 2. 总体流程
 
@@ -34,6 +34,10 @@ flowchart TD
     RC --> WR[LLM write_report]
     WR --> R[report.md + 来源清单]
     A --> J[run.jsonl + 终端日志]
+
+    DOC[Document] -. 独立基础设施，尚未接入 Agent .-> CH[Chunk]
+    CH --> EM[EmbeddingModel]
+    EM --> VS[(ChromaStore)]
 ```
 
 实际循环是：
@@ -76,6 +80,18 @@ competitor-agent/
 ├── config/
 │   ├── __init__.py
 │   └── settings.py
+├── knowledge/
+│   ├── __init__.py
+│   ├── document.py
+│   ├── chunk.py
+│   └── splitter.py
+├── embedding/
+│   ├── __init__.py
+│   ├── base.py
+│   └── openai_embedding.py
+├── retrieval/
+│   ├── __init__.py
+│   └── chroma_store.py
 └── storage/
     ├── __init__.py
     └── logger.py
@@ -84,7 +100,7 @@ competitor-agent/
 | 文件 | 类/对象 | 当前职责 |
 |---|---|---|
 | `main.py` | `parse_args`、`main` | 解析 CLI、创建 Config/LLM/ResearchTools/ToolRegistry/State/Agent 并调用 `run()`；同时转发旧版公开导入名称 |
-| `config/settings.py` | `Config` | 从 `.env` 读取模型、API Key、决策重试次数、轮数、Context 预算和 HTTP 超时 |
+| `config/settings.py` | `Config` | 从 `.env` 读取 LLM/Embedding 模型、API Key、决策重试次数、轮数、Context 预算和 HTTP 超时 |
 | `agent/state.py` | `PlanStep`、`Source`、`AgentState` | 保存计划步骤、来源和最新可恢复状态，并负责 JSON 序列化 |
 | `agent/context.py` | `ContextBuilder`、`ReportContextBuilder` | 将 State 转换为有限决策 Context 或较丰富的报告 Context，不调用 LLM |
 | `agent/core.py` | `CompetitorAgent` | 编排组件，通过 Registry 执行 Action，保持原有 Agent Loop、状态持久化和报告落盘 |
@@ -97,9 +113,15 @@ competitor-agent/
 | `tools/research.py` | `SearchWebTool`、`ReadWebTool`、`ReplanTool`、`FinishTool`、`ResearchTools` | 实现四个可执行 Tool；底层研究客户端负责 Tavily、URL 安全检查和网页读取 |
 | `tools/demo.py` | `DemoLLMBackend`、`DemoResearchTools` | 提供固定动作脚本和 Alpha/Beta 离线网页夹具 |
 | `storage/logger.py` | `RunLogger`、`utc_now`、`compact` | 将事件追加到 `run.jsonl`、输出压缩终端日志，并提供时间/压缩辅助函数 |
+| `knowledge/document.py` | `Document` | 表示可序列化的原始知识文档，并提供从 `Source` 转换的兼容入口 |
+| `knowledge/chunk.py` | `Chunk` | 表示携带文档 ID 和元数据的可序列化文本片段 |
+| `knowledge/splitter.py` | `TextSplitter` | 使用可配置字符窗口和重叠量把 Document 切分为 Chunk |
+| `embedding/base.py` | `EmbeddingModel` | 定义单文本和批量文本向量化的提供商无关接口 |
+| `embedding/openai_embedding.py` | `OpenAIEmbedding` | 复用 Config 的 API Key/Base URL，通过 OpenAI SDK 批量生成向量 |
+| `retrieval/chroma_store.py` | `ChromaStore` | 初始化内存或持久化 Chroma Collection，写入 Chunk/Embedding 并执行相似度查询 |
 | 各目录 `__init__.py` | 包导出 | 声明 Python 包并导出主要公共类型 |
 
-当前不存在 Scheduler、Planner 服务、Memory 服务、RAG 服务或 Multi-Agent Coordinator 等独立组件。
+当前不存在 Scheduler、Planner 服务、运行时 RAG 服务或 Multi-Agent Coordinator 等独立组件。Knowledge Layer 当前是可单独调用的基础设施，不属于 `CompetitorAgent` 的执行依赖。`ContextBuilder` 不查询 Chroma，Tool Registry 也没有检索工具，因此新增模块不会改变现有 Agent 行为。
 
 ## 4. LLM 与 Agent Runtime 的职责区别
 
@@ -265,13 +287,14 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 | `LLM_DECISION_RETRIES` | Tool Call 缺失或参数 JSON 非法时的额外重试次数，默认 2 |
 | `LLM_MODEL` | `gpt-4.1-mini` |
 | `LLM_BASE_URL` | 可选 OpenAI 兼容服务地址 |
+| `EMBEDDING_MODEL` | `text-embedding-3-small`，仅供独立 Knowledge Layer 使用 |
 | `TAVILY_API_KEY` | 真实搜索必需 |
 | `MAX_ROUNDS` | `12` |
 | `CONTEXT_CHAR_BUDGET` | `14000` |
 | `REPORT_CONTEXT_CHAR_BUDGET` | `70000` |
 | `HTTP_TIMEOUT` | `20` 秒 |
 
-第三方 Python 依赖只有 `openai` 和 `python-dotenv`；搜索和网页读取使用标准库 `urllib`。
+第三方 Python 依赖包括 `openai`、`python-dotenv` 和 `chromadb`；搜索和网页读取使用标准库 `urllib`。
 
 ## 13. 当前部署形态与边界
 
@@ -281,6 +304,6 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 - JSONL 没有代码版本和单次 CLI invocation ID，且 `progress_assessment` 事件本身不含轮次字段；
 - 没有服务端 API、Web UI、鉴权或多租户隔离；
 - 没有异步 Worker 或分布式执行；
-- 没有长期 Memory、RAG 或 Multi-Agent。
+- 没有接入 Agent 的长期 Memory、RAG 或 Multi-Agent；Knowledge/Chroma 仅为独立基础设施。
 
 上述均可作为未来扩展方向，但不属于当前架构。

@@ -215,6 +215,6 @@ Finish 后的流程为：
 - 当前版本未实现 Multi-Agent 协作；
 - 当前版本未实现人类审批节点；
 - 当前版本未实现并行工具调用；
-- 当前版本未实现长期 Memory 或 RAG。
+- 当前版本未把独立的 Knowledge/Embedding/Chroma 基础设施接入 Agent，因此 Agent 尚无长期 Memory 或 RAG 检索行为。
 
 这些可以作为未来扩展方向，但不属于当前 `CompetitorAgent` 的职责或能力。

@@ -40,6 +40,7 @@ LLM 每次只接收当前一轮构造出的 Context 并返回一次计划、动�
 11. 将完整事件流写入 `run.jsonl`，并在终端输出压缩日志；
 12. 使用已有 `state.json` 恢复执行。
 13. 在工具执行前根据统一的 `input_schema` 校验模型参数，非法调用记录为 `tool_error` 后继续运行。
+14. 提供独立的 Document、Chunk、文本切分、Embedding 和 Chroma 向量存储基础设施，供后续 RAG 阶段使用。
 
 当前动作集合固定为：
 
@@ -84,7 +85,7 @@ artifacts/<run>/
 - 不使用 LangGraph、CrewAI、AutoGen 等成熟 Agent 编排框架。
 - 当前没有 Multi-Agent，也没有 Agent 间通信、角色分工或冲突协调。
 - 当前没有长期 Memory。
-- 当前没有向量数据库、Embedding 检索或 RAG 系统。
+- 当前已有独立的 Chroma 与 Embedding 基础设施，但尚未接入 Agent、ContextBuilder 或 Tool Registry，因此当前 Agent 没有 RAG 行为。
 - 当前没有任务队列、后台调度器或并发研究执行。
 - `.env` 用于本地保存 API Key，`.gitignore` 忽略 `.env`。
 
@@ -131,7 +132,7 @@ artifacts/<run>/
 
 - Multi-Agent 协作；
 - 长期 Memory、用户画像或跨任务经验复用；
-- RAG、向量索引或语义检索；
+- Agent 运行时 RAG、自动知识入库或自动语义检索；
 - 自动学习、自我训练或从历史运行中更新策略；
 - 完整浏览器自动化；
 - 异步/并行工具调用；
