@@ -13,12 +13,20 @@ from agent.context import ContextBuilder, ReportContextBuilder
 from agent.core import CompetitorAgent
 from agent.state import AgentState, PlanStep, Source
 from config.settings import Config
-from llm.backend import LLMBackend
+from llm.backend import LLMBackend, LLMResponseError
 from llm.openai_backend import OpenAIBackend
 from storage.logger import RunLogger, compact, utc_now
+from tools.base import BaseTool, ToolValidationError
 from tools.demo import DemoLLMBackend, DemoResearchTools
-from tools.research import ResearchTools, VisibleTextParser
-from tools.schemas import TOOL_SCHEMAS
+from tools.registry import ToolRegistry, build_default_registry
+from tools.research import (
+    FinishTool,
+    ReadWebTool,
+    ReplanTool,
+    ResearchTools,
+    SearchWebTool,
+    VisibleTextParser,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -52,8 +60,9 @@ def main(argv: list[str] | None = None) -> int:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         run_dir = args.output_dir or Path("artifacts") / ("demo" if args.demo else stamp)
     llm: LLMBackend = DemoLLMBackend() if args.demo else OpenAIBackend(config)
-    tools = DemoResearchTools(config) if args.demo else ResearchTools(config)
-    agent = CompetitorAgent(llm, tools, config, run_dir, state)
+    research_tools = DemoResearchTools(config) if args.demo else ResearchTools(config)
+    tool_registry = build_default_registry(research_tools, state)
+    agent = CompetitorAgent(llm, tool_registry, config, run_dir, state)
     try:
         report_path = agent.run()
     except Exception as exc:

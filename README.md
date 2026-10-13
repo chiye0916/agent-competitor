@@ -15,8 +15,10 @@ llm/
 ├── openai_backend.py      OpenAI API 调用实现
 └── prompts.py             LLM 提示词
 tools/
-├── schemas.py             Function Calling Schema
-├── research.py            搜索、网页读取与 URL 安全检查
+├── base.py                统一 Tool 接口与轻量参数校验
+├── registry.py            Tool 注册、Schema 发现和执行分发
+├── schemas.py             内置 Tool 的输入 Schema 与描述
+├── research.py            四个内置 Tool、搜索/读取与 URL 安全检查
 └── demo.py                离线模型脚本和网页夹具
 config/settings.py         环境变量与运行配置
 storage/logger.py          JSONL 日志与公共序列化辅助函数
@@ -83,7 +85,13 @@ python main.py --resume artifacts/<run>/state.json
 python -m unittest discover -s tests -v
 ```
 
-覆盖多轮循环、搜索/读取工具路径、模型驱动的步骤完成、Replan、状态持久化、Context 事件窗口与字符预算、报告和来源生成。真实 LLM 与 Tavily 调用必须配置有效 Key 后单独验证。
+覆盖多轮循环、四个内置 Tool、动态 Tool 注册、输入校验与错误恢复、模型驱动的步骤完成、Replan、状态持久化、Context 事件窗口与字符预算、报告和来源生成。真实 LLM 与 Tavily 调用必须配置有效 Key 后单独验证。
+
+## Tool Framework
+
+所有可被 Agent 调用的工具都继承 `BaseTool`，并在同一个类上声明名称、描述、输入 Schema 和执行逻辑。`ToolRegistry` 按注册顺序动态生成 OpenAI Function Calling Schema，在执行前校验参数，再把调用分发给目标 Tool。普通 Tool 只返回自己的 Observation；Registry 统一返回 `(ends_run, observation)`，默认仅 `FinishTool` 会结束循环。
+
+新增普通工具不需要修改 `CompetitorAgent._execute()`：实现 `BaseTool` 后调用 `registry.register(tool)` 即可。当前默认 Registry 注册 `search_web`、`read_web`、`replan` 和 `finish`，其名称、参数和返回结果与重构前一致。
 
 ## 为什么不是硬编码流程？
 
@@ -96,6 +104,6 @@ python -m unittest discover -s tests -v
 ## 已知边界
 
 - 网页读取器面向普通 HTML/文本，不执行 JavaScript，也不解析 PDF。
-- 搜索仅实现 Tavily；可在 `ResearchTools` 中增加其他 API。
+- 默认搜索实现仅接入 Tavily；其他研究工具或未来的 MCP 适配器可通过 `BaseTool` 注册。
 - Context 使用简单字符预算，不是精确 token 计数。
 - Tool error 会写入状态并进入下一轮，但 MVP 未实现指数退避。

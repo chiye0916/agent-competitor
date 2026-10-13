@@ -13,7 +13,20 @@ import urllib.request
 from html.parser import HTMLParser
 from typing import Any
 
+from agent.state import AgentState, PlanStep, Source
 from config.settings import Config
+from storage.logger import utc_now
+from tools.base import BaseTool
+from tools.schemas import (
+    FINISH_DESCRIPTION,
+    FINISH_INPUT_SCHEMA,
+    READ_WEB_DESCRIPTION,
+    READ_WEB_INPUT_SCHEMA,
+    REPLAN_DESCRIPTION,
+    REPLAN_INPUT_SCHEMA,
+    SEARCH_WEB_DESCRIPTION,
+    SEARCH_WEB_INPUT_SCHEMA,
+)
 
 
 class VisibleTextParser(HTMLParser):
@@ -130,3 +143,124 @@ class ResearchTools:
             raise RuntimeError(f"暂不支持网页类型: {content_type}")
         text = re.sub(r"\s+", " ", html.unescape(text)).strip()
         return {"url": url, "title": title[:300], "content": text[:50_000]}
+
+
+class SearchWebTool(BaseTool):
+    name = "search_web"
+    description = SEARCH_WEB_DESCRIPTION
+    input_schema = SEARCH_WEB_INPUT_SCHEMA
+
+    def __init__(self, research_tools: ResearchTools, state: AgentState):
+        self.research_tools = research_tools
+        self.state = state
+
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
+        output = self.research_tools.search_web(kwargs["query"])
+        added = 0
+        known = {source.url: source for source in self.state.sources}
+        for result in output.get("results", []):
+            if result["url"] in known:
+                known[result["url"]].snippet = result.get(
+                    "snippet", known[result["url"]].snippet
+                )
+                continue
+            source = Source(
+                id=f"S{len(self.state.sources) + 1}",
+                title=result.get("title", "Untitled"),
+                url=result["url"],
+                snippet=result.get("snippet", ""),
+            )
+            self.state.sources.append(source)
+            known[source.url] = source
+            added += 1
+        return {
+            "result_count": len(output.get("results", [])),
+            "sources_added": added,
+            "preview": output,
+        }
+
+
+class ReadWebTool(BaseTool):
+    name = "read_web"
+    description = READ_WEB_DESCRIPTION
+    input_schema = READ_WEB_INPUT_SCHEMA
+
+    def __init__(self, research_tools: ResearchTools, state: AgentState):
+        self.research_tools = research_tools
+        self.state = state
+
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
+        output = self.research_tools.read_web(kwargs["url"])
+        source_id = self._upsert_source(output)
+        return {
+            "source_id": source_id,
+            "content_chars": len(output.get("content", "")),
+            "preview": {**output, "content": output.get("content", "")[:500]},
+        }
+
+    def _upsert_source(self, output: dict[str, Any]) -> str:
+        for source in self.state.sources:
+            if source.url == output["url"]:
+                source.title = output.get("title") or source.title
+                source.content = output.get("content", "")
+                source.via = "read_web"
+                source.retrieved_at = utc_now()
+                return source.id
+        source = Source(
+            id=f"S{len(self.state.sources) + 1}",
+            title=output.get("title", output["url"]),
+            url=output["url"],
+            content=output.get("content", ""),
+            via="read_web",
+        )
+        self.state.sources.append(source)
+        return source.id
+
+
+class ReplanTool(BaseTool):
+    name = "replan"
+    description = REPLAN_DESCRIPTION
+    input_schema = REPLAN_INPUT_SCHEMA
+
+    def __init__(self, state: AgentState):
+        self.state = state
+
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
+        completed = [step for step in self.state.plan if step.status == "completed"]
+        replanned = [
+            PlanStep(
+                id=f"R{self.state.replan_count + 1}-{index}",
+                description=text,
+            )
+            for index, text in enumerate(kwargs["new_steps"], 1)
+            if text.strip()
+        ]
+        if not replanned:
+            raise ValueError("replan 至少需要一个非空步骤")
+        self.state.plan = completed + replanned
+        self.state.replan_count += 1
+        self.state.repetition_strikes = 0
+        return {
+            "reason": kwargs["reason"],
+            "new_step_ids": [step.id for step in replanned],
+            "replan": True,
+        }
+
+
+class FinishTool(BaseTool):
+    name = "finish"
+    description = FINISH_DESCRIPTION
+    input_schema = FINISH_INPUT_SCHEMA
+    ends_run = True
+
+    def __init__(self, state: AgentState):
+        self.state = state
+
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.state.sources:
+            raise RuntimeError("尚未收集任何来源，不能 finish")
+        completed = self.state.complete_steps(kwargs.get("completed_step_ids", []))
+        return {
+            "reason": kwargs["reason"],
+            "completed_steps": completed,
+        }

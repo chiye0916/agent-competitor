@@ -16,6 +16,7 @@ class Config:
     context_char_budget: int = 14_000
     report_context_char_budget: int = 70_000
     request_timeout: int = 20
+    decision_max_retries: int = 2
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -35,4 +36,5 @@ class Config:
             context_char_budget=int(os.getenv("CONTEXT_CHAR_BUDGET", "14000")),
             report_context_char_budget=int(os.getenv("REPORT_CONTEXT_CHAR_BUDGET", "70000")),
             request_timeout=int(os.getenv("HTTP_TIMEOUT", "20")),
+            decision_max_retries=max(0, int(os.getenv("LLM_DECISION_RETRIES", "2"))),
         )

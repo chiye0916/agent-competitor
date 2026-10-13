@@ -9,12 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from agent.context import ContextBuilder, ReportContextBuilder
-from agent.state import AgentState, PlanStep, Source
+from agent.state import AgentState, PlanStep
 from config.settings import Config
-from llm.backend import LLMBackend
-from storage.logger import RunLogger, utc_now
-from tools.research import ResearchTools
-from tools.schemas import TOOL_SCHEMAS
+from llm.backend import LLMBackend, LLMResponseError
+from storage.logger import RunLogger
+from tools.registry import ToolRegistry
 
 
 class CompetitorAgent:
@@ -24,14 +23,14 @@ class CompetitorAgent:
     def __init__(
         self,
         llm: LLMBackend,
-        tools: ResearchTools,
+        tool_registry: ToolRegistry,
         config: Config,
         run_dir: Path,
         state: AgentState,
         echo_logs: bool = True,
     ):
         self.llm = llm
-        self.tools = tools
+        self.tool_registry = tool_registry
         self.config = config
         self.run_dir = run_dir
         self.state = state
@@ -100,60 +99,14 @@ class CompetitorAgent:
         self.logger.emit(event, **detail)
         self.state.add_event(event, detail)
 
-    def _upsert_search_sources(self, output: dict[str, Any]) -> int:
-        added = 0
-        known = {source.url: source for source in self.state.sources}
-        for result in output.get("results", []):
-            if result["url"] in known:
-                known[result["url"]].snippet = result.get("snippet", known[result["url"]].snippet)
-                continue
-            source = Source(
-                id=f"S{len(self.state.sources) + 1}",
-                title=result.get("title", "Untitled"),
-                url=result["url"],
-                snippet=result.get("snippet", ""),
-            )
-            self.state.sources.append(source)
-            known[source.url] = source
-            added += 1
-        return added
-
-    def _upsert_read_source(self, output: dict[str, Any]) -> str:
-        for source in self.state.sources:
-            if source.url == output["url"]:
-                source.title = output.get("title") or source.title
-                source.content = output.get("content", "")
-                source.via = "read_web"
-                source.retrieved_at = utc_now()
-                return source.id
-        source = Source(
-            id=f"S{len(self.state.sources) + 1}",
-            title=output.get("title", output["url"]),
-            url=output["url"],
-            content=output.get("content", ""),
-            via="read_web",
-        )
-        self.state.sources.append(source)
-        return source.id
-
-    def _apply_replan(self, new_steps: list[str]) -> list[str]:
-        completed = [step for step in self.state.plan if step.status == "completed"]
-        replanned = [
-            PlanStep(id=f"R{self.state.replan_count + 1}-{index}", description=text)
-            for index, text in enumerate(new_steps, 1)
-            if text.strip()
-        ]
-        if not replanned:
-            raise ValueError("replan 至少需要一个非空步骤")
-        self.state.plan = completed + replanned
-        self.state.replan_count += 1
-        self.state.repetition_strikes = 0
-        return [step.id for step in replanned]
-
     def _force_replan(self, reason: str) -> list[str]:
         context = self.context_builder.build(self.state)
         new_steps = self.llm.revise_plan(context, reason)
-        new_ids = self._apply_replan(new_steps)
+        _, observation = self.tool_registry.execute(
+            "replan",
+            {"reason": reason, "new_steps": new_steps},
+        )
+        new_ids = observation["new_step_ids"]
         self._record(
             "forced_replan",
             reason=reason,
@@ -185,26 +138,11 @@ class CompetitorAgent:
         )
         return completed
 
-    def _execute(self, action: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        name = action.get("name")
-        args = action.get("arguments") or {}
-        if name == "search_web":
-            output = self.tools.search_web(args["query"])
-            added = self._upsert_search_sources(output)
-            return False, {"result_count": len(output.get("results", [])), "sources_added": added, "preview": output}
-        if name == "read_web":
-            output = self.tools.read_web(args["url"])
-            source_id = self._upsert_read_source(output)
-            return False, {"source_id": source_id, "content_chars": len(output.get("content", "")), "preview": {**output, "content": output.get("content", "")[:500]}}
-        if name == "replan":
-            new_ids = self._apply_replan(args["new_steps"])
-            return False, {"reason": args["reason"], "new_step_ids": new_ids, "replan": True}
-        if name == "finish":
-            if not self.state.sources:
-                raise RuntimeError("尚未收集任何来源，不能 finish")
-            completed = self.state.complete_steps(args.get("completed_step_ids", []))
-            return True, {"reason": args["reason"], "completed_steps": completed}
-        raise ValueError(f"未知工具: {name}")
+    def _execute(self, action: dict[str, Any]) -> tuple[bool, Any]:
+        return self.tool_registry.execute(
+            action.get("name"),
+            action.get("arguments") or {},
+        )
 
     def run(self) -> Path:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -231,7 +169,21 @@ class CompetitorAgent:
                 current_step=pending[0] if pending else None,
                 context_chars=len(json.dumps(context, ensure_ascii=False)),
             )
-            action = self.llm.decide(context, TOOL_SCHEMAS)
+            try:
+                action = self.llm.decide(context, self.tool_registry.schemas())
+            except LLMResponseError as exc:
+                self._record(
+                    "decision_error",
+                    round=self.state.round,
+                    error=str(exc),
+                    attempts=exc.attempts,
+                    tool_name=exc.tool_name,
+                    raw_arguments_length=exc.raw_arguments_length,
+                    raw_arguments_preview=exc.raw_arguments_preview,
+                    error_position=exc.position,
+                )
+                self.state.save(self.state_path)
+                continue
             self._record("agent_decision", round=self.state.round, action=action)
             guard = self._register_action(action)
             if guard["duplicate"]:
@@ -242,14 +194,26 @@ class CompetitorAgent:
                     previous_count=guard["previous_count"],
                     repetition_strikes=guard["repetition_strikes"],
                 )
-            if guard["blocked"]:
-                reason = f"动作 {guard['signature']} 已执行至少 {self.MAX_SAME_ACTIONS} 次，拒绝再次执行"
+            repetition_threshold_reached = (
+                guard["duplicate"]
+                and guard["repetition_strikes"] >= self.REPLAN_REPETITION_THRESHOLD
+            )
+            if guard["blocked"] or repetition_threshold_reached:
+                if guard["blocked"]:
+                    reason = (
+                        f"动作 {guard['signature']} 已执行至少 {self.MAX_SAME_ACTIONS} 次，"
+                        "拒绝再次执行"
+                    )
+                else:
+                    reason = (
+                        f"累计检测到 {guard['repetition_strikes']} 次重复动作，"
+                        f"拒绝再次执行 {guard['signature']}"
+                    )
                 self._record("action_blocked", round=self.state.round, reason=reason)
-                if self.state.repetition_strikes >= self.REPLAN_REPETITION_THRESHOLD:
-                    try:
-                        self._force_replan(reason)
-                    except Exception as exc:
-                        self._record("forced_replan_error", round=self.state.round, error=str(exc))
+                try:
+                    self._force_replan(reason)
+                except Exception as exc:
+                    self._record("forced_replan_error", round=self.state.round, error=str(exc))
                 self.state.save(self.state_path)
                 continue
             try:
