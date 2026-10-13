@@ -4,7 +4,12 @@
 
 本文档描述当前仓库中的实际实现，主要依据如下：
 
-- `main.py`：配置、状态、工具、LLM 后端、Context 构建、Agent Loop 和 CLI；
+- `main.py`：CLI 参数解析、依赖初始化和运行入口；
+- `agent/`：State、Context 构建和 Agent Loop；
+- `llm/`：模型后端协议、OpenAI API 实现和提示词；
+- `tools/`：Tool Schema、真实研究工具和离线 Demo；
+- `config/`：环境变量与运行配置；
+- `storage/`：JSONL 运行日志；
 - `tests/test_agent.py`：当前自动化测试覆盖范围；
 - `README.md`、`.env.example`、`requirements.txt`：运行与配置方式；
 - `artifacts/demo/`：离线演示产物；

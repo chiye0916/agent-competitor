@@ -20,5 +20,5 @@ Alpha 面向小型产品团队，强调协作编辑并提供免费层及每月 2
 
 ## 来源
 
-- [S1] [Alpha official product page](https://example.test/alpha)（2026-10-12T03:04:26+00:00）
-- [S2] [Beta official product page](https://example.test/beta)（2026-10-12T03:04:26+00:00）
+- [S1] [Alpha official product page](https://example.test/alpha)（2026-10-13T01:51:37+00:00）
+- [S2] [Beta official product page](https://example.test/beta)（2026-10-13T01:51:37+00:00）

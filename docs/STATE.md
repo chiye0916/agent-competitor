@@ -2,7 +2,7 @@
 
 ## 1. State 的作用
 
-LLM 的每次 API 调用彼此独立，不会自动记住上一轮做过什么。当前系统使用 Python 数据结构 `AgentState` 保存任务执行事实，并在每轮后序列化到 `state.json`。
+LLM 的每次 API 调用彼此独立，不会自动记住上一轮做过什么。当前系统使用 `agent/state.py` 中的 Python 数据结构 `AgentState` 保存任务执行事实，并在每轮后序列化到 `state.json`。
 
 State 解决的是同一个运行中的连续执行与恢复问题：
 

@@ -2,7 +2,7 @@
 
 ## 1. 架构范围
 
-当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。核心实现集中在 `main.py`，没有外部 Agent 编排框架。
+当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 只负责 CLI 参数解析和依赖装配。
 
 ## 2. 总体流程
 
@@ -46,24 +46,49 @@ User Task
   → Continue / Replan / Finish
 ```
 
-## 3. 组件及职责
+## 3. 模块结构与职责
 
-| 类/对象 | 当前职责 |
-|---|---|
-| `Config` | 从 `.env` 读取模型、API Key、轮数、Context 预算和 HTTP 超时 |
-| `PlanStep` | 保存单个计划步骤的 ID、描述和状态 |
-| `Source` | 保存搜索摘要、网页正文、URL、来源方式和获取时间 |
-| `AgentState` | 保存任务执行的最新可恢复状态 |
-| `RunLogger` | 将事件追加到 `run.jsonl` 并输出压缩终端日志 |
-| `VisibleTextParser` | 从 HTML 中提取可见文本，忽略 script/style/noscript/svg |
-| `ResearchTools` | 调用 Tavily 搜索，读取和解析公开网页 |
-| `LLMBackend` | 规定 Planning、Decision、Progress、Replan、Report 五类 LLM 能力接口 |
-| `OpenAIBackend` | 使用 OpenAI SDK Chat Completions 实现 `LLMBackend` |
-| `DemoLLMBackend` | 使用固定动作脚本完成离线演示 |
-| `DemoResearchTools` | 提供 Alpha/Beta 固定搜索和网页夹具 |
-| `ContextBuilder` | 从 State 构造每轮有限决策 Context |
-| `ReportContextBuilder` | 从 State 构造较丰富的最终报告 Context |
-| `CompetitorAgent` | 编排上述组件，执行 Agent Loop、状态持久化和报告落盘 |
+```text
+competitor-agent/
+├── main.py
+├── agent/
+│   ├── __init__.py
+│   ├── core.py
+│   ├── state.py
+│   └── context.py
+├── llm/
+│   ├── __init__.py
+│   ├── backend.py
+│   ├── openai_backend.py
+│   └── prompts.py
+├── tools/
+│   ├── __init__.py
+│   ├── schemas.py
+│   ├── research.py
+│   └── demo.py
+├── config/
+│   ├── __init__.py
+│   └── settings.py
+└── storage/
+    ├── __init__.py
+    └── logger.py
+```
+
+| 文件 | 类/对象 | 当前职责 |
+|---|---|---|
+| `main.py` | `parse_args`、`main` | 解析 CLI、创建 Config/LLM/Tools/State/Agent 并调用 `run()`；同时转发旧版公开导入名称 |
+| `config/settings.py` | `Config` | 从 `.env` 读取模型、API Key、轮数、Context 预算和 HTTP 超时 |
+| `agent/state.py` | `PlanStep`、`Source`、`AgentState` | 保存计划步骤、来源和最新可恢复状态，并负责 JSON 序列化 |
+| `agent/context.py` | `ContextBuilder`、`ReportContextBuilder` | 将 State 转换为有限决策 Context 或较丰富的报告 Context，不调用 LLM |
+| `agent/core.py` | `CompetitorAgent` | 编排组件，执行原有 Agent Loop、状态持久化和报告落盘 |
+| `llm/backend.py` | `LLMBackend` | 规定 Planning、Decision、Progress、Replan、Report 五类 LLM 能力接口 |
+| `llm/openai_backend.py` | `OpenAIBackend` | 使用 OpenAI SDK Chat Completions 实现 `LLMBackend` |
+| `llm/prompts.py` | 提示词常量 | 集中保存 OpenAI 后端使用的五类提示词 |
+| `tools/schemas.py` | `TOOL_SCHEMAS` | 保存四个 Function Calling Schema，不执行工具 |
+| `tools/research.py` | `VisibleTextParser`、`ResearchTools` | 调用 Tavily 搜索，执行 URL 安全检查并读取公开网页 |
+| `tools/demo.py` | `DemoLLMBackend`、`DemoResearchTools` | 提供固定动作脚本和 Alpha/Beta 离线网页夹具 |
+| `storage/logger.py` | `RunLogger`、`utc_now`、`compact` | 将事件追加到 `run.jsonl`、输出压缩终端日志，并提供时间/压缩辅助函数 |
+| 各目录 `__init__.py` | 包导出 | 声明 Python 包并导出主要公共类型 |
 
 当前不存在 Scheduler、Planner 服务、Memory 服务、RAG 服务或 Multi-Agent Coordinator 等独立组件。
 

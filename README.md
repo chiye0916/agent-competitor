@@ -5,13 +5,30 @@
 ## 项目结构
 
 ```text
-main.py                 核心代码：配置、状态、工具、LLM、循环与 CLI
-tests/test_agent.py     无 Key 的可执行测试
-ARCHITECTURE.md         Mermaid 架构图
-SUMMARY.md              阶段一概念总结
-.env.example            配置模板
-artifacts/demo/         离线完整运行的状态、日志和报告
+main.py                    CLI 参数解析、依赖初始化和运行入口
+agent/
+├── core.py                CompetitorAgent 与 Agent Loop
+├── state.py               PlanStep、Source、AgentState
+└── context.py             决策 Context 与报告 Context
+llm/
+├── backend.py             LLMBackend 协议
+├── openai_backend.py      OpenAI API 调用实现
+└── prompts.py             LLM 提示词
+tools/
+├── schemas.py             Function Calling Schema
+├── research.py            搜索、网页读取与 URL 安全检查
+└── demo.py                离线模型脚本和网页夹具
+config/settings.py         环境变量与运行配置
+storage/logger.py          JSONL 日志与公共序列化辅助函数
+tests/test_agent.py        无 Key 的可执行测试
+docs/                      当前实现的详细交接文档
+ARCHITECTURE.md            Mermaid 架构图
+SUMMARY.md                 阶段一概念总结
+.env.example               配置模板
+artifacts/demo/            离线完整运行的状态、日志和报告
 ```
+
+`main.py` 仍兼容原有的核心类型导入，但不再包含 Agent 业务实现。
 
 ## 安装
 
