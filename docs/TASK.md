@@ -52,7 +52,7 @@ Plan 生成后，每轮 Context 同时包含：
 - 字符预算内选取的证据；
 - 最近 6 个压缩事件。
 
-LLM 根据这些信息从 `search_web`、`read_web`、`replan`、`finish` 中选择一个 Action。搜索词、URL、用途和目标步骤由 LLM 在 Action 参数中给出。
+真实模式下，LLM 根据这些信息从 `search_web`、`read_web`、`retrieve_knowledge`、`replan`、`finish` 中选择一个 Action。查询词、URL、用途和目标步骤由 LLM 在 Action 参数中给出。`retrieve_knowledge` 用于复用已有知识库，`search_web` 用于知识库缺失或需要最新信息的情况；Runtime 不强制固定调用顺序。
 
 成功执行搜索或读取后，系统调用 `assess_progress()`，让模型根据当前计划、已有证据和最新 Observation 提议可完成的步骤。Runtime 只会更新实际存在且尚未完成的步骤 ID。
 

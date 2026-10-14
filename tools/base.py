@@ -15,6 +15,7 @@ class BaseTool:
     description: str = ""
     input_schema: dict[str, Any] = {}
     ends_run: bool = False
+    strict: bool = True
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -23,7 +24,7 @@ class BaseTool:
                 "name": self.name,
                 "description": self.description,
                 "parameters": deepcopy(self.input_schema),
-                "strict": True,
+                "strict": self.strict,
             },
         }
 

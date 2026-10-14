@@ -13,11 +13,15 @@ from agent.context import ContextBuilder, ReportContextBuilder
 from agent.core import CompetitorAgent
 from agent.state import AgentState, PlanStep, Source
 from config.settings import Config
+from embedding.openai_embedding import OpenAIEmbedding
 from llm.backend import LLMBackend, LLMResponseError
 from llm.openai_backend import OpenAIBackend
+from retrieval.chroma_store import ChromaStore
+from retrieval.retriever import Retriever
 from storage.logger import RunLogger, compact, utc_now
 from tools.base import BaseTool, ToolValidationError
 from tools.demo import DemoLLMBackend, DemoResearchTools
+from tools.knowledge import KnowledgeRetrievalTool
 from tools.registry import ToolRegistry, build_default_registry
 from tools.research import (
     FinishTool,
@@ -61,7 +65,16 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = args.output_dir or Path("artifacts") / ("demo" if args.demo else stamp)
     llm: LLMBackend = DemoLLMBackend() if args.demo else OpenAIBackend(config)
     research_tools = DemoResearchTools(config) if args.demo else ResearchTools(config)
-    tool_registry = build_default_registry(research_tools, state)
+    retriever = None
+    if not args.demo:
+        embedding_model = OpenAIEmbedding(config)
+        knowledge_store = ChromaStore(
+            embedding_model=embedding_model,
+            collection_name=config.knowledge_collection,
+            persist_directory=config.knowledge_db_path,
+        )
+        retriever = Retriever(knowledge_store)
+    tool_registry = build_default_registry(research_tools, state, retriever)
     agent = CompetitorAgent(llm, tool_registry, config, run_dir, state)
     try:
         report_path = agent.run()

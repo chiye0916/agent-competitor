@@ -2,7 +2,7 @@
 
 ## 1. 架构范围
 
-当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 只负责 CLI 参数解析和依赖装配。仓库另有独立的 Knowledge Layer、Embedding 接口和 Chroma 存储基础设施，但尚未连接到 Agent Runtime。
+当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 只负责 CLI 参数解析和依赖装配。Knowledge Layer 通过 `retrieve_knowledge` Tool 接入真实模式的 Tool Registry，由 LLM 自主决定是否检索；`ContextBuilder` 不做自动检索。
 
 ## 2. 总体流程
 
@@ -20,10 +20,15 @@ flowchart TD
     D --> TR[ToolRegistry<br/>校验 + 分发]
     TR -->|search_web| SW[SearchWebTool<br/>Tavily API]
     TR -->|read_web| RW[ReadWebTool<br/>HTTP + HTMLParser]
+    TR -->|retrieve_knowledge| KT[KnowledgeRetrievalTool]
     TR -->|replan| RP[ReplanTool<br/>替换未完成 PlanStep]
     TR -->|finish| FN[FinishTool]
     SW --> O[Observation]
     RW --> O
+    KT --> RET[Retriever]
+    RET --> VS[(ChromaStore)]
+    VS --> KT
+    KT --> O
     RP --> O
     FN --> O
     O --> PA[LLM assess_progress<br/>仅 search/read 成功后]
@@ -35,9 +40,9 @@ flowchart TD
     WR --> R[report.md + 来源清单]
     A --> J[run.jsonl + 终端日志]
 
-    DOC[Document] -. 独立基础设施，尚未接入 Agent .-> CH[Chunk]
+    DOC[Document] --> CH[Chunk]
     CH --> EM[EmbeddingModel]
-    EM --> VS[(ChromaStore)]
+    EM --> VS
 ```
 
 实际循环是：
@@ -75,6 +80,7 @@ competitor-agent/
 │   ├── base.py
 │   ├── registry.py
 │   ├── schemas.py
+│   ├── knowledge.py
 │   ├── research.py
 │   └── demo.py
 ├── config/
@@ -91,7 +97,8 @@ competitor-agent/
 │   └── openai_embedding.py
 ├── retrieval/
 │   ├── __init__.py
-│   └── chroma_store.py
+│   ├── chroma_store.py
+│   └── retriever.py
 └── storage/
     ├── __init__.py
     └── logger.py
@@ -108,8 +115,9 @@ competitor-agent/
 | `llm/openai_backend.py` | `OpenAIBackend` | 使用 OpenAI SDK Chat Completions 实现 `LLMBackend`；对缺失 Tool Call 或非法参数 JSON 做有限重试 |
 | `llm/prompts.py` | 提示词常量 | 集中保存 OpenAI 后端使用的五类提示词 |
 | `tools/base.py` | `BaseTool`、`ToolValidationError` | 定义统一 Tool 接口、生成单个 Function Schema 并执行轻量输入校验 |
-| `tools/registry.py` | `ToolRegistry`、`build_default_registry` | 注册 Tool、动态汇总 Schema、校验并分发执行；组装四个默认工具 |
-| `tools/schemas.py` | 描述与输入 Schema 常量 | 保存四个内置 Tool 的参数契约，不再维护静态工具列表 |
+| `tools/registry.py` | `ToolRegistry`、`build_default_registry` | 注册 Tool、动态汇总 Schema、校验并分发执行；真实模式传入 Retriever 时组装五个工具 |
+| `tools/schemas.py` | 描述与输入 Schema 常量 | 保存五个内置 Tool 的参数契约，不再维护静态工具列表 |
+| `tools/knowledge.py` | `KnowledgeRetrievalTool` | 把 `retrieve_knowledge` 暴露给 LLM，并把 Retriever 结果转换为统一 Observation |
 | `tools/research.py` | `SearchWebTool`、`ReadWebTool`、`ReplanTool`、`FinishTool`、`ResearchTools` | 实现四个可执行 Tool；底层研究客户端负责 Tavily、URL 安全检查和网页读取 |
 | `tools/demo.py` | `DemoLLMBackend`、`DemoResearchTools` | 提供固定动作脚本和 Alpha/Beta 离线网页夹具 |
 | `storage/logger.py` | `RunLogger`、`utc_now`、`compact` | 将事件追加到 `run.jsonl`、输出压缩终端日志，并提供时间/压缩辅助函数 |
@@ -119,9 +127,10 @@ competitor-agent/
 | `embedding/base.py` | `EmbeddingModel` | 定义单文本和批量文本向量化的提供商无关接口 |
 | `embedding/openai_embedding.py` | `OpenAIEmbedding` | 复用 Config 的 API Key/Base URL，通过 OpenAI SDK 批量生成向量 |
 | `retrieval/chroma_store.py` | `ChromaStore` | 初始化内存或持久化 Chroma Collection，写入 Chunk/Embedding 并执行相似度查询 |
+| `retrieval/retriever.py` | `Retriever` | 为 Tool 提供稳定查询边界，隔离 Chroma 和 Embedding 细节 |
 | 各目录 `__init__.py` | 包导出 | 声明 Python 包并导出主要公共类型 |
 
-当前不存在 Scheduler、Planner 服务、运行时 RAG 服务或 Multi-Agent Coordinator 等独立组件。Knowledge Layer 当前是可单独调用的基础设施，不属于 `CompetitorAgent` 的执行依赖。`ContextBuilder` 不查询 Chroma，Tool Registry 也没有检索工具，因此新增模块不会改变现有 Agent 行为。
+当前不存在 Scheduler、Planner 服务、自动 Context RAG 服务或 Multi-Agent Coordinator。真实模式在 CLI 装配阶段创建 `OpenAIEmbedding → ChromaStore → Retriever → KnowledgeRetrievalTool`；Agent Core 仍只面向 Tool Registry，不包含任何知识库分支。Demo 不装配 Retriever，保持原有固定六轮行为。
 
 ## 4. LLM 与 Agent Runtime 的职责区别
 
@@ -211,7 +220,7 @@ stateDiagram-v2
 }
 ```
 
-`CompetitorAgent._execute()` 只把 `name` 和 `arguments` 交给 `ToolRegistry.execute()`。Registry 查找工具、根据同一 Tool 的 `input_schema` 校验参数，再调用 `tool.execute(**arguments)`。Tool 只返回自身 Observation；Registry 根据 Tool 的 `ends_run` 元数据统一返回 `(ends_run, observation)`，默认只有 `FinishTool` 将其设为 `True`。Function Schema 声明 `strict: true`，同时仍保留 Runtime 校验。非法参数或未知名称会由 Agent 原有错误路径记录为 `tool_error`，不会终止整个循环。
+`CompetitorAgent._execute()` 只把 `name` 和 `arguments` 交给 `ToolRegistry.execute()`。Registry 查找工具、根据同一 Tool 的 `input_schema` 校验参数，再调用 `tool.execute(**arguments)`。Tool 只返回自身 Observation；Registry 根据 Tool 的 `ends_run` 元数据统一返回 `(ends_run, observation)`，默认只有 `FinishTool` 将其设为 `True`。现有四个 Tool 保持严格 Schema；`retrieve_knowledge` 因 `top_k` 是带默认值的可选参数而使用非严格 Schema，同时仍保留 Runtime 校验。非法参数或未知名称会由 Agent 原有错误路径记录为 `tool_error`，不会终止整个循环。
 
 如果模型返回的 `function.arguments` 不是合法 JSON，`OpenAIBackend` 会在请求中加入格式纠正提示后重试。默认允许 2 次额外重试；全部失败后抛出 `LLMResponseError`。Runtime 将其记录为 `decision_error`，日志只保存参数长度及最多 600 字符的首尾摘要，随后保存 State 并进入下一轮。该异常发生在 Registry 之前，不属于 `tool_error`。
 
@@ -287,7 +296,9 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 | `LLM_DECISION_RETRIES` | Tool Call 缺失或参数 JSON 非法时的额外重试次数，默认 2 |
 | `LLM_MODEL` | `gpt-4.1-mini` |
 | `LLM_BASE_URL` | 可选 OpenAI 兼容服务地址 |
-| `EMBEDDING_MODEL` | `text-embedding-3-small`，仅供独立 Knowledge Layer 使用 |
+| `EMBEDDING_MODEL` | `text-embedding-3-small`，供 `retrieve_knowledge` 查询向量化使用 |
+| `KNOWLEDGE_DB_PATH` | `.knowledge/chroma`，真实模式的持久化 Chroma 路径 |
+| `KNOWLEDGE_COLLECTION` | `competitor_knowledge` |
 | `TAVILY_API_KEY` | 真实搜索必需 |
 | `MAX_ROUNDS` | `12` |
 | `CONTEXT_CHAR_BUDGET` | `14000` |
@@ -304,6 +315,6 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 - JSONL 没有代码版本和单次 CLI invocation ID，且 `progress_assessment` 事件本身不含轮次字段；
 - 没有服务端 API、Web UI、鉴权或多租户隔离；
 - 没有异步 Worker 或分布式执行；
-- 没有接入 Agent 的长期 Memory、RAG 或 Multi-Agent；Knowledge/Chroma 仅为独立基础设施。
+- 没有自动 Context RAG、知识自动入库、长期 Memory 或 Multi-Agent；当前只有 LLM 自主调用的知识检索 Tool。
 
 上述均可作为未来扩展方向，但不属于当前架构。

@@ -40,16 +40,17 @@ LLM 每次只接收当前一轮构造出的 Context 并返回一次计划、动�
 11. 将完整事件流写入 `run.jsonl`，并在终端输出压缩日志；
 12. 使用已有 `state.json` 恢复执行。
 13. 在工具执行前根据统一的 `input_schema` 校验模型参数，非法调用记录为 `tool_error` 后继续运行。
-14. 提供独立的 Document、Chunk、文本切分、Embedding 和 Chroma 向量存储基础设施，供后续 RAG 阶段使用。
+14. 提供 Document、Chunk、文本切分、Embedding 和 Chroma 向量存储基础设施；真实模式通过 `retrieve_knowledge` Tool 由 LLM 自主查询已有知识。
 
 当前动作集合固定为：
 
 - `search_web`
 - `read_web`
+- `retrieve_knowledge`（真实模式）
 - `replan`
 - `finish`
 
-这四个动作是 CLI 默认创建的 Registry 内容，不再是 `CompetitorAgent._execute()` 中的硬编码分支。代码可以仅通过实现 `BaseTool` 并调用 `registry.register()` 注册其他工具；当前默认 Agent 能力仍保持上述四项。
+真实 CLI 向 Registry 注册上述五个动作，离线 Demo 为保持无需 API Key 的固定六轮验收，只注册原有四项。动作不在 `CompetitorAgent._execute()` 中硬编码；代码可以仅通过实现 `BaseTool` 并调用 `registry.register()` 注册其他工具。
 
 分析步骤顺序、搜索词、待读取 URL、何时 Replan 和何时 Finish 在真实模式下由 LLM 根据 Context 决定；Runtime 不硬编码 Cursor、Claude Code、Codex 等具体产品的研究流程。
 
@@ -85,7 +86,7 @@ artifacts/<run>/
 - 不使用 LangGraph、CrewAI、AutoGen 等成熟 Agent 编排框架。
 - 当前没有 Multi-Agent，也没有 Agent 间通信、角色分工或冲突协调。
 - 当前没有长期 Memory。
-- 当前已有独立的 Chroma 与 Embedding 基础设施，但尚未接入 Agent、ContextBuilder 或 Tool Registry，因此当前 Agent 没有 RAG 行为。
+- 当前 Chroma 与 Embedding 通过 `retrieve_knowledge` Tool 接入真实模式的 Tool Registry，但没有接入 ContextBuilder；是否检索完全由 LLM 决定。
 - 当前没有任务队列、后台调度器或并发研究执行。
 - `.env` 用于本地保存 API Key，`.gitignore` 忽略 `.env`。
 
@@ -132,7 +133,7 @@ artifacts/<run>/
 
 - Multi-Agent 协作；
 - 长期 Memory、用户画像或跨任务经验复用；
-- Agent 运行时 RAG、自动知识入库或自动语义检索；
+- 自动 Context RAG、自动知识入库或无 Tool 调用的自动语义检索；
 - 自动学习、自我训练或从历史运行中更新策略；
 - 完整浏览器自动化；
 - 异步/并行工具调用；

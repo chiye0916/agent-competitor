@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from agent.state import AgentState
+from retrieval.retriever import Retriever
 from tools.base import BaseTool
+from tools.knowledge import KnowledgeRetrievalTool
 from tools.research import (
     FinishTool,
     ReadWebTool,
@@ -41,10 +43,16 @@ class ToolRegistry:
         return tool.ends_run, tool.execute(**arguments)
 
 
-def build_default_registry(research_tools: ResearchTools, state: AgentState) -> ToolRegistry:
+def build_default_registry(
+    research_tools: ResearchTools,
+    state: AgentState,
+    retriever: Retriever | None = None,
+) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(SearchWebTool(research_tools, state))
     registry.register(ReadWebTool(research_tools, state))
+    if retriever is not None:
+        registry.register(KnowledgeRetrievalTool(retriever))
     registry.register(ReplanTool(state))
     registry.register(FinishTool(state))
     return registry

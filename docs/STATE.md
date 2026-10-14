@@ -15,7 +15,7 @@ State 解决的是同一个运行中的连续执行与恢复问题：
 - 哪些动作发生重复；
 - 最终报告是否已经生成。
 
-它不是长期 Memory、对话记忆库或 RAG 索引。第三阶段新增的 Chroma 基础设施独立于 AgentState，当前不会自动读取或回写 State。
+它不是长期 Memory、对话记忆库或 RAG 索引。第三阶段的 Chroma 由 `retrieve_knowledge` Tool 查询，但仍独立于 AgentState，不会自动读取或回写 State。
 
 ## 2. `AgentState` 完整字段
 
@@ -144,7 +144,7 @@ class Source:
 - 当前版本未实现跨任务长期 Memory；
 - 当前版本未实现 conversation memory；
 - 当前版本未实现 memory database；
-- 当前版本未实现接入 AgentState 的 vector memory 或 RAG；独立 Embedding/Chroma 基础设施尚未进入 Agent 流程；
+- 当前版本未实现接入 AgentState 的 vector memory 或自动 Context RAG；Embedding/Chroma 仅通过 Tool Observation 进入 Agent 事件链；
 - 当前版本未实现结构化事实表或持久化证据矩阵；
 - 当前版本未实现 State 版本迁移框架；旧状态仅依靠 dataclass 默认字段兼容缺少的新字段。
 
@@ -160,4 +160,4 @@ class Source:
 | `Document` | Knowledge Layer | 表示进入知识系统前的完整原始文档，可由 `Document.from_source()` 显式转换 |
 | `Chunk` | Knowledge Layer | 表示切分后用于 Embedding 和 Chroma 索引的文本片段 |
 
-新增 Knowledge 类型没有替换或修改 `Source`。当前也没有自动把 `state.sources` 导入 Chroma；转换、切分和索引必须由独立调用方显式执行。
+新增 Knowledge 类型没有替换或修改 `Source`。当前也没有自动把 `state.sources` 导入 Chroma；转换、切分和索引必须由独立调用方显式执行。`retrieve_knowledge` 返回的 Chunk 不会自动转成 Source 或写入 State。

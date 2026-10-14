@@ -65,7 +65,7 @@ self.tool_registry.execute(action["name"], action["arguments"])
 
 ## 4. Agent Decision
 
-真实模式下，`OpenAIBackend.decide()` 使用 function calling，并设置 `tool_choice="required"`。可用 Schema 由 `ToolRegistry` 根据已注册 Tool 动态生成，并声明严格参数模式。默认 Registry 注册以下四个 Action。
+真实模式下，`OpenAIBackend.decide()` 使用 function calling，并设置 `tool_choice="required"`。可用 Schema 由 `ToolRegistry` 根据已注册 Tool 动态生成。真实 CLI 注册五个 Action；离线 Demo 不初始化 Embedding/Chroma，因此仍使用原有四个 Action。模型必须每轮选择一个可用 Tool，但没有任何规则强制选择知识检索或 Web 搜索。
 
 模型返回 Tool Call 后，后端先把 `function.arguments` 解析为 JSON。缺失 Tool Call 或 JSON 非法时，后端会附加纠错提示并按 `LLM_DECISION_RETRIES` 重试（默认额外重试 2 次）。重试耗尽后抛出携带工具名、错误位置、参数长度和截断摘要的 `LLMResponseError`。
 
@@ -89,7 +89,28 @@ Runtime 将 `query` 交给 Tavily。搜索结果保存为 `Source`，包含标�
 
 Runtime 读取公开网页并保存可见文本。读取器会拒绝非 HTTP(S)、localhost、解析为非公网 IP 的目标，并只接受 HTML、XHTML 或纯文本。
 
-### 4.3 `replan`
+### 4.3 `retrieve_knowledge`
+
+参数：
+
+- `query`
+- `top_k`，可选，默认 5
+
+该 Tool 用于复用 `.knowledge/chroma` 中已有的历史知识。调用链为 `KnowledgeRetrievalTool → Retriever → ChromaStore`，成功时返回统一 Observation：
+
+```json
+{
+  "success": true,
+  "tool": "retrieve_knowledge",
+  "query": "AI model pricing",
+  "result_count": 2,
+  "results": []
+}
+```
+
+知识库缺少资料或任务要求最新信息时，应使用 `search_web`。检索异常沿用现有 Tool 错误路径记录为 `tool_error`，Agent 可以在下一轮恢复。检索结果不会自动写入 `Source`，也不会触发自动 Context 检索。
+
+### 4.4 `replan`
 
 参数：
 
@@ -98,7 +119,7 @@ Runtime 读取公开网页并保存可见文本。读取器会拒绝非 HTTP(S)�
 
 Runtime 保留已完成步骤，用新步骤替换全部未完成步骤，并增加 `replan_count`。
 
-### 4.4 `finish`
+### 4.5 `finish`
 
 参数：
 
@@ -120,7 +141,7 @@ Planning 是模型生成的研究导航，不是固定工作流，也不是任�
 
 ## 6. Progress Assessment
 
-每次 `search_web` 或 `read_web` 成功后，当前代码会调用 `LLMBackend.assess_progress()`。输入包括当前决策 Context 和刚完成的工具 Observation。步骤完成标准是已有证据足以支撑最终报告，不要求先生成中间总结或对比表；最终综合由 `write_report()` 完成。
+每次 `search_web` 或 `read_web` 成功后，当前代码会调用 `LLMBackend.assess_progress()`。输入包括当前决策 Context 和刚完成的工具 Observation。步骤完成标准是已有证据足以支撑最终报告，不要求先生成中间总结或对比表；最终综合由 `write_report()` 完成。`retrieve_knowledge` 当前只产生 Observation，不自动完成步骤。
 
 模型返回：
 
@@ -215,6 +236,6 @@ Finish 后的流程为：
 - 当前版本未实现 Multi-Agent 协作；
 - 当前版本未实现人类审批节点；
 - 当前版本未实现并行工具调用；
-- 当前版本未把独立的 Knowledge/Embedding/Chroma 基础设施接入 Agent，因此 Agent 尚无长期 Memory 或 RAG 检索行为。
+- 当前版本没有自动 Context RAG、知识自动入库或长期 Memory；只有由 LLM 自主选择的 `retrieve_knowledge` Tool。
 
 这些可以作为未来扩展方向，但不属于当前 `CompetitorAgent` 的职责或能力。
