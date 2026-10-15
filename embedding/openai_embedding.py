@@ -17,15 +17,20 @@ class OpenAIEmbedding(EmbeddingModel):
         client: Any | None = None,
     ) -> None:
         if client is None:
-            if not config.api_key:
-                raise RuntimeError("缺少 LLM_API_KEY（或 OPENAI_API_KEY）")
+            api_key = config.embedding_api_key or config.api_key
+            base_url = config.embedding_base_url or config.base_url
+            if not api_key:
+                raise RuntimeError(
+                    "缺少 EMBEDDING_API_KEY（未配置时可回退使用 "
+                    "LLM_API_KEY 或 OPENAI_API_KEY）"
+                )
             try:
                 from openai import OpenAI
             except ImportError as exc:
                 raise RuntimeError("缺少 openai SDK，请先安装 requirements.txt") from exc
-            kwargs: dict[str, Any] = {"api_key": config.api_key}
-            if config.base_url:
-                kwargs["base_url"] = config.base_url
+            kwargs: dict[str, Any] = {"api_key": api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
             client = OpenAI(**kwargs)
         self.client = client
         self.model = model or config.embedding_model

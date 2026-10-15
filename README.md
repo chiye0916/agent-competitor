@@ -30,10 +30,10 @@ Copy-Item .env.example .env
 
 至少配置：
 
-- `LLM_API_KEY`：OpenAI 或兼容服务的 Key；
+- `LLM_API_KEY`：OpenAI 或兼容对话服务的 Key；
 - `LLM_MODEL`、可选 `LLM_BASE_URL`；
 - `TAVILY_API_KEY`；
-- `EMBEDDING_MODEL`；
+- `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`：可配置与对话模型不同的 OpenAI 兼容 Embedding 服务，Key 和 Base URL 留空时回退到 LLM 配置；
 - `KNOWLEDGE_DB_PATH` 和 `KNOWLEDGE_COLLECTION`；
 - `KNOWLEDGE_AUTO_INGEST=true`：真实报告成功后自动增量入库。
 

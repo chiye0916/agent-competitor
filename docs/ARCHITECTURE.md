@@ -136,7 +136,7 @@ competitor-agent/
 | `knowledge/ingestion.py` | `KnowledgeIngestionPipeline` | 规范化 URL/正文、识别版本、切分、Embedding、stage、版本切换并汇总结果 |
 | `knowledge/service.py` | `KnowledgeIngestionService` | 隔离报告完成边界和入库失败，写入完成或错误日志 |
 | `embedding/base.py` | `EmbeddingModel` | 定义单文本和批量文本向量化的提供商无关接口 |
-| `embedding/openai_embedding.py` | `OpenAIEmbedding` | 复用 Config 的 API Key/Base URL，通过 OpenAI SDK 批量生成向量 |
+| `embedding/openai_embedding.py` | `OpenAIEmbedding` | 使用独立 Embedding API 配置（可回退到 LLM 配置），通过 OpenAI SDK 批量生成向量 |
 | `retrieval/chroma_store.py` | `ChromaStore` | 管理 Chroma、分阶段版本写入、原子版本清单、旧版本过滤与相似度查询 |
 | `retrieval/retriever.py` | `Retriever` | 为 Tool 提供稳定查询边界，隔离 Chroma 和 Embedding 细节 |
 | 各目录 `__init__.py` | 包导出 | 声明 Python 包并导出主要公共类型 |
@@ -308,6 +308,8 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 | `LLM_DECISION_RETRIES` | Tool Call 缺失或参数 JSON 非法时的额外重试次数，默认 2 |
 | `LLM_MODEL` | `gpt-4.1-mini` |
 | `LLM_BASE_URL` | 可选 OpenAI 兼容服务地址 |
+| `EMBEDDING_API_KEY` | 可选独立 Embedding 服务 Key；留空时回退到 LLM Key |
+| `EMBEDDING_BASE_URL` | 可选独立 Embedding 服务地址；留空时回退到 `LLM_BASE_URL` |
 | `EMBEDDING_MODEL` | `text-embedding-3-small`，供 `retrieve_knowledge` 查询向量化使用 |
 | `KNOWLEDGE_DB_PATH` | `.knowledge/chroma`，真实模式的持久化 Chroma 路径 |
 | `KNOWLEDGE_COLLECTION` | `competitor_knowledge` |

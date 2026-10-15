@@ -161,6 +161,8 @@ Chroma 不提供本项目所需的跨向量与文件清单数据库事务，因�
 ## 8. 配置
 
 ```env
+EMBEDDING_API_KEY=<embedding-provider-key>
+EMBEDDING_BASE_URL=https://api.openai.com/v1
 EMBEDDING_MODEL=text-embedding-3-small
 KNOWLEDGE_DB_PATH=.knowledge/chroma
 KNOWLEDGE_COLLECTION=competitor_knowledge
@@ -169,6 +171,8 @@ KNOWLEDGE_MIN_CONTENT_CHARS=200
 KNOWLEDGE_CHUNK_SIZE=500
 KNOWLEDGE_CHUNK_OVERLAP=50
 ```
+
+`OpenAIEmbedding` 使用独立的 `EMBEDDING_API_KEY` 和 `EMBEDDING_BASE_URL`，因此对话可继续使用 DeepSeek 等不提供 Embedding 的服务。为了兼容原有单提供商配置，这两项留空时分别回退到 `LLM_API_KEY` 和 `LLM_BASE_URL`。`EMBEDDING_MODEL` 必须是 Embedding 提供商实际支持的模型。
 
 `.knowledge/` 被 Git 忽略。更换 Embedding 模型可能改变向量维度或语义空间；当前没有自动迁移机制，应为不兼容模型使用新的 Collection。
 

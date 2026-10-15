@@ -36,6 +36,8 @@ class Config:
     report_context_char_budget: int = 70_000
     request_timeout: int = 20
     decision_max_retries: int = 2
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -46,11 +48,15 @@ class Config:
         except ImportError:
             # Offline demo/tests deliberately have no third-party dependency.
             pass
+        llm_base_url = os.getenv("LLM_BASE_URL") or None
+        llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
         return cls(
             model=os.getenv("LLM_MODEL", "gpt-4.1-mini"),
-            base_url=os.getenv("LLM_BASE_URL") or None,
-            api_key=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
+            base_url=llm_base_url,
+            api_key=llm_api_key,
             embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+            embedding_base_url=os.getenv("EMBEDDING_BASE_URL") or llm_base_url,
+            embedding_api_key=os.getenv("EMBEDDING_API_KEY") or llm_api_key,
             knowledge_db_path=os.getenv("KNOWLEDGE_DB_PATH", ".knowledge/chroma"),
             knowledge_collection=os.getenv("KNOWLEDGE_COLLECTION", "competitor_knowledge"),
             knowledge_auto_ingest=_env_bool("KNOWLEDGE_AUTO_INGEST", True),

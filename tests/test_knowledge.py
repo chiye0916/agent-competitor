@@ -1,7 +1,10 @@
 import json
+import os
+import sys
 import unittest
 from collections.abc import Sequence
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 from agent.state import Source
@@ -50,6 +53,70 @@ class FakeEmbeddingsAPI:
 
 
 class KnowledgeLayerTests(unittest.TestCase):
+    def test_config_reads_independent_embedding_provider(self):
+        environment = {
+            "LLM_API_KEY": "llm-key",
+            "LLM_BASE_URL": "https://llm.example/v1",
+            "EMBEDDING_API_KEY": "embedding-key",
+            "EMBEDDING_BASE_URL": "https://embedding.example/v1",
+            "EMBEDDING_MODEL": "embedding-model",
+        }
+        dotenv = SimpleNamespace(load_dotenv=lambda: None)
+
+        with patch.dict(os.environ, environment, clear=True), patch.dict(
+            sys.modules, {"dotenv": dotenv}
+        ):
+            config = Config.from_env()
+
+        self.assertEqual(config.api_key, "llm-key")
+        self.assertEqual(config.base_url, "https://llm.example/v1")
+        self.assertEqual(config.embedding_api_key, "embedding-key")
+        self.assertEqual(config.embedding_base_url, "https://embedding.example/v1")
+        self.assertEqual(config.embedding_model, "embedding-model")
+
+    def test_config_falls_back_to_llm_provider_for_embeddings(self):
+        environment = {
+            "LLM_API_KEY": "shared-key",
+            "LLM_BASE_URL": "https://shared.example/v1",
+        }
+        dotenv = SimpleNamespace(load_dotenv=lambda: None)
+
+        with patch.dict(os.environ, environment, clear=True), patch.dict(
+            sys.modules, {"dotenv": dotenv}
+        ):
+            config = Config.from_env()
+
+        self.assertEqual(config.embedding_api_key, "shared-key")
+        self.assertEqual(config.embedding_base_url, "https://shared.example/v1")
+
+    def test_openai_embedding_uses_independent_provider_configuration(self):
+        constructor_calls = []
+
+        def create_client(**kwargs):
+            constructor_calls.append(kwargs)
+            return SimpleNamespace()
+
+        openai_module = SimpleNamespace(OpenAI=create_client)
+        config = Config(
+            api_key="llm-key",
+            base_url="https://llm.example/v1",
+            embedding_api_key="embedding-key",
+            embedding_base_url="https://embedding.example/v1",
+        )
+
+        with patch.dict(sys.modules, {"openai": openai_module}):
+            OpenAIEmbedding(config)
+
+        self.assertEqual(
+            constructor_calls,
+            [
+                {
+                    "api_key": "embedding-key",
+                    "base_url": "https://embedding.example/v1",
+                }
+            ],
+        )
+
     def test_document_serialization_and_source_conversion(self):
         source = Source(
             id="S1",
