@@ -20,7 +20,7 @@ class AgentState:
 python main.py --task "分析 Cursor、Claude Code、Codex 的产品定位、功能和价格"
 ```
 
-如果既没有提供 `--task`，也没有使用 `--resume` 或 `--demo`，CLI 会返回错误码 2。系统只检查任务是否存在，不对产品数量、研究维度、语言或输出格式做结构化校验。
+如果既没有提供 `--task`，也没有使用 `--resume`、`--demo` 或 `--ingest-existing`，CLI 会返回错误码 2。系统只检查任务是否存在，不对产品数量、研究维度、语言或输出格式做结构化校验。`--ingest-existing` 只重试已完成运行的知识入库，不创建或恢复 Agent 研究轮次。
 
 `--demo` 是例外：它会使用固定任务“比较 Alpha 与 Beta 的定位、定价和适用场景”，并配合固定的模型决策和网页夹具验证执行链路。Demo 结果不是实时竞品研究。
 
@@ -80,7 +80,7 @@ Plan 生成后，每轮 Context 同时包含：
 1. 至少已有一个 `Source`，否则拒绝 Finish；
 2. 将 `completed_step_ids` 中匹配现有计划的步骤设为 `completed`。
 
-之后系统构造报告 Context、调用 `write_report()`、写入 `report.md`，并将状态改为 `completed`。
+之后系统构造报告 Context、调用 `write_report()`、写入 `report.md`，并将状态改为 `completed`。真实模式在这些步骤全部成功后，才根据配置调用独立 Knowledge Ingestion Pipeline；入库结果不参与 Finish 决策，失败也不会改变任务的 `completed` 状态。
 
 当前没有独立的任务完成度规则引擎，也没有强制校验“每个竞品 × 每个维度”都已有证据。最终是否足够完成主要依赖 LLM 决策。
 

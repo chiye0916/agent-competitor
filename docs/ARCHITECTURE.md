@@ -2,7 +2,7 @@
 
 ## 1. 架构范围
 
-当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 只负责 CLI 参数解析和依赖装配。Knowledge Layer 通过 `retrieve_knowledge` Tool 接入真实模式的 Tool Registry，由 LLM 自主决定是否检索；`ContextBuilder` 不做自动检索。
+当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 负责 CLI、依赖装配和报告完成后的入库触发。Knowledge Layer 通过 `retrieve_knowledge` Tool 提供自主检索，并在真实报告成功后通过独立 Pipeline 增量入库；`ContextBuilder` 不做自动检索。
 
 ## 2. 总体流程
 
@@ -38,11 +38,14 @@ flowchart TD
     O -->|finished| RC[ReportContextBuilder]
     RC --> WR[LLM write_report]
     WR --> R[report.md + 来源清单]
-    A --> J[run.jsonl + 终端日志]
-
-    DOC[Document] --> CH[Chunk]
+    R --> KIS[KnowledgeIngestionService<br/>仅真实成功运行]
+    KIS --> KE[KnowledgeEvaluator]
+    KE --> DOC[Document]
+    DOC --> CH[Versioned Chunk]
     CH --> EM[EmbeddingModel]
     EM --> VS
+    VS --> VM[原子版本清单<br/>切换可见版本]
+    A --> J[run.jsonl + 终端日志]
 ```
 
 实际循环是：
@@ -90,7 +93,11 @@ competitor-agent/
 │   ├── __init__.py
 │   ├── document.py
 │   ├── chunk.py
-│   └── splitter.py
+│   ├── splitter.py
+│   ├── policy.py
+│   ├── evaluator.py
+│   ├── ingestion.py
+│   └── service.py
 ├── embedding/
 │   ├── __init__.py
 │   ├── base.py
@@ -106,8 +113,8 @@ competitor-agent/
 
 | 文件 | 类/对象 | 当前职责 |
 |---|---|---|
-| `main.py` | `parse_args`、`main` | 解析 CLI、创建 Config/LLM/ResearchTools/ToolRegistry/State/Agent 并调用 `run()`；同时转发旧版公开导入名称 |
-| `config/settings.py` | `Config` | 从 `.env` 读取 LLM/Embedding 模型、API Key、决策重试次数、轮数、Context 预算和 HTTP 超时 |
+| `main.py` | `parse_args`、`main` | 解析 CLI、装配 Agent 与共享知识服务；报告成功后触发自动入库，并支持从已完成 State 单独重试 |
+| `config/settings.py` | `Config` | 从 `.env` 读取 LLM、Embedding、知识库、入库策略、轮数、Context 预算和 HTTP 配置 |
 | `agent/state.py` | `PlanStep`、`Source`、`AgentState` | 保存计划步骤、来源和最新可恢复状态，并负责 JSON 序列化 |
 | `agent/context.py` | `ContextBuilder`、`ReportContextBuilder` | 将 State 转换为有限决策 Context 或较丰富的报告 Context，不调用 LLM |
 | `agent/core.py` | `CompetitorAgent` | 编排组件，通过 Registry 执行 Action，保持原有 Agent Loop、状态持久化和报告落盘 |
@@ -124,13 +131,17 @@ competitor-agent/
 | `knowledge/document.py` | `Document` | 表示可序列化的原始知识文档，并提供从 `Source` 转换的兼容入口 |
 | `knowledge/chunk.py` | `Chunk` | 表示携带文档 ID 和元数据的可序列化文本片段 |
 | `knowledge/splitter.py` | `TextSplitter` | 使用可配置字符窗口和重叠量把 Document 切分为 Chunk |
+| `knowledge/policy.py` | `KnowledgePolicy` | 保存最小正文长度等确定性准入阈值 |
+| `knowledge/evaluator.py` | `KnowledgeEvaluator`、`EvaluationResult` | 评估 Source，返回可解释的接受、拒绝原因和质量标记，不访问 Chroma |
+| `knowledge/ingestion.py` | `KnowledgeIngestionPipeline` | 规范化 URL/正文、识别版本、切分、Embedding、stage、版本切换并汇总结果 |
+| `knowledge/service.py` | `KnowledgeIngestionService` | 隔离报告完成边界和入库失败，写入完成或错误日志 |
 | `embedding/base.py` | `EmbeddingModel` | 定义单文本和批量文本向量化的提供商无关接口 |
 | `embedding/openai_embedding.py` | `OpenAIEmbedding` | 复用 Config 的 API Key/Base URL，通过 OpenAI SDK 批量生成向量 |
-| `retrieval/chroma_store.py` | `ChromaStore` | 初始化内存或持久化 Chroma Collection，写入 Chunk/Embedding 并执行相似度查询 |
+| `retrieval/chroma_store.py` | `ChromaStore` | 管理 Chroma、分阶段版本写入、原子版本清单、旧版本过滤与相似度查询 |
 | `retrieval/retriever.py` | `Retriever` | 为 Tool 提供稳定查询边界，隔离 Chroma 和 Embedding 细节 |
 | 各目录 `__init__.py` | 包导出 | 声明 Python 包并导出主要公共类型 |
 
-当前不存在 Scheduler、Planner 服务、自动 Context RAG 服务或 Multi-Agent Coordinator。真实模式在 CLI 装配阶段创建 `OpenAIEmbedding → ChromaStore → Retriever → KnowledgeRetrievalTool`；Agent Core 仍只面向 Tool Registry，不包含任何知识库分支。Demo 不装配 Retriever，保持原有固定六轮行为。
+当前不存在 Scheduler、Planner 服务、自动 Context RAG 服务或 Multi-Agent Coordinator。真实模式在 CLI 装配阶段让 Retriever 和 Ingestion Pipeline 共享同一 ChromaStore；Agent Core 仍只面向 Tool Registry，不包含入库分支。Demo 不装配知识服务，保持原有固定六轮行为且不污染真实知识库。
 
 ## 4. LLM 与 Agent Runtime 的职责区别
 
@@ -282,9 +293,10 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 4. 构造 Report Context；
 5. 调用 LLM 写报告；
 6. 追加全部来源 Markdown 列表；
-7. 写 `report.md`，更新 State 并记录完成日志。
+7. 写 `report.md`，更新 State 并记录 `run_completed`；
+8. 真实模式且 `KNOWLEDGE_AUTO_INGEST=true` 时，在 Agent 返回后执行独立入库。
 
-报告生成不是另一个 Agent，也没有独立的审稿循环。
+入库不位于 Agent Loop 内。失败时记录 `ingestion_error` 和独立状态，不回滚报告、不把 AgentState 从 `completed` 改为 `failed`。报告生成不是另一个 Agent，也没有独立的审稿循环。
 
 ## 12. 配置与依赖
 
@@ -299,6 +311,10 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 | `EMBEDDING_MODEL` | `text-embedding-3-small`，供 `retrieve_knowledge` 查询向量化使用 |
 | `KNOWLEDGE_DB_PATH` | `.knowledge/chroma`，真实模式的持久化 Chroma 路径 |
 | `KNOWLEDGE_COLLECTION` | `competitor_knowledge` |
+| `KNOWLEDGE_AUTO_INGEST` | `true`，报告成功后自动执行增量入库 |
+| `KNOWLEDGE_MIN_CONTENT_CHARS` | `200`，已读取正文的最低有效字符数 |
+| `KNOWLEDGE_CHUNK_SIZE` | `500` |
+| `KNOWLEDGE_CHUNK_OVERLAP` | `50` |
 | `TAVILY_API_KEY` | 真实搜索必需 |
 | `MAX_ROUNDS` | `12` |
 | `CONTEXT_CHAR_BUDGET` | `14000` |
@@ -310,11 +326,11 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 ## 13. 当前部署形态与边界
 
 - 单机 CLI、同步执行；
-- State 使用本地 JSON 文件，没有数据库事务或并发写保护；
+- State 和知识版本清单使用本地 JSON 文件，没有多进程并发写保护；
 - Log 使用本地 JSONL 追加，没有集中式日志系统；
 - JSONL 没有代码版本和单次 CLI invocation ID，且 `progress_assessment` 事件本身不含轮次字段；
 - 没有服务端 API、Web UI、鉴权或多租户隔离；
 - 没有异步 Worker 或分布式执行；
-- 没有自动 Context RAG、知识自动入库、长期 Memory 或 Multi-Agent；当前只有 LLM 自主调用的知识检索 Tool。
+- 没有自动 Context RAG、知识刷新、事实可信度判断、长期 Memory 或 Multi-Agent；当前自动入库只发生在真实报告成功之后。
 
 上述均可作为未来扩展方向，但不属于当前架构。

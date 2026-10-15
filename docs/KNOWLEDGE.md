@@ -1,97 +1,42 @@
-# Knowledge Layer 与 Tool 化检索
+# Knowledge Layer、检索与增量入库
 
-## 1. 阶段范围
+## 1. 当前能力与边界
 
-阶段三 Step 1 建立了 Document、Chunk、文本切分、Embedding 和 Chroma 向量存储基础设施。Step 2 在不修改 Agent Loop、State、Checkpoint、Planning 和 ContextBuilder 核心逻辑的前提下，通过 `retrieve_knowledge` Tool 将查询能力接入真实运行模式。
+Knowledge Layer 目前包含三条相互独立的职责链：
 
-检索由 LLM 自主决定是否调用，不是自动 Context RAG。系统不会自动索引 `AgentState.sources`，检索结果也不会自动写回 State、转成 Source 或注入最终报告证据。
+1. Document、Chunk、TextSplitter、Embedding 与 Chroma 基础设施；
+2. 由 LLM 自主选择的 `retrieve_knowledge` Tool 检索链；
+3. 真实研究报告成功落盘后的自动知识入库链。
 
-## 2. 目录与职责
+自动入库发生在 Agent Loop 和报告生成之后，不改变 Planning、Replan、Finish、State 或 Tool Calling。它不是每轮自动 RAG，也不是 Long-term Memory。Demo 不初始化真实知识库，不执行自动入库。
+
+## 2. 模块职责
 
 ```text
 knowledge/
-├── __init__.py
-├── document.py          # 原始知识文档及 Source 显式转换入口
-├── chunk.py             # 可检索文本片段
-└── splitter.py          # 重叠字符窗口切分
+├── document.py       # 原始知识文档和 Source 转换
+├── chunk.py          # 向量索引片段
+├── splitter.py       # 重叠字符窗口切分
+├── policy.py         # 可配置的确定性入库规则
+├── evaluator.py      # 可解释的 Source 接受/拒绝结果
+├── ingestion.py      # 去重、版本判断、切分、Embedding、分阶段写入
+└── service.py        # 报告完成后的隔离边界与日志
 
 embedding/
-├── __init__.py
-├── base.py              # EmbeddingModel 抽象接口
-└── openai_embedding.py  # OpenAI-compatible Embedding 实现
+├── base.py
+└── openai_embedding.py
 
 retrieval/
-├── __init__.py
-├── chroma_store.py      # Chroma 写入和向量查询
-└── retriever.py         # 查询服务边界，隔离 Tool 与 Chroma 细节
+├── chroma_store.py   # Chroma、版本清单、可见性切换与查询过滤
+└── retriever.py      # Tool 面向的查询服务
 
 tools/
-└── knowledge.py         # KnowledgeRetrievalTool 与统一 Observation
+└── knowledge.py      # retrieve_knowledge Tool
 ```
 
-### `Document`
+`KnowledgeEvaluator` 不调用 LLM、Embedding 或 Chroma，也不修改 AgentState。`KnowledgeIngestionPipeline` 复用 `Document.from_source()`、TextSplitter、EmbeddingModel 和 ChromaStore，不复制已有能力。
 
-`Document` 保存 `id`、`title`、可选 `url`、完整 `content` 和 `metadata`，支持 `to_dict()` / `from_dict()` 序列化。`Document.from_source()` 可以显式复制 Agent `Source` 的正文和来源信息，但不会修改原 Source。
-
-### `Chunk` 与 `TextSplitter`
-
-`Chunk` 保存唯一 ID、所属 `document_id`、片段文本和元数据。`TextSplitter(chunk_size=500, chunk_overlap=50)` 使用无第三方依赖的重叠字符窗口切分，并补充标题、URL、片段序号和字符位置。
-
-### `EmbeddingModel` 与 `OpenAIEmbedding`
-
-`EmbeddingModel` 定义：
-
-```python
-embed_text(text) -> list[float]
-embed_documents(texts) -> list[list[float]]
-```
-
-`OpenAIEmbedding` 复用当前 `Config` 的 API Key 和兼容服务 Base URL，默认模型由 `EMBEDDING_MODEL` 指定。批量文本通过一次 SDK `embeddings.create()` 调用提交，并按响应 `index` 恢复输入顺序。
-
-### `ChromaStore` 与 `Retriever`
-
-`ChromaStore` 支持进程内 Client 和指定 `persist_directory` 的本地持久化 Client。`add_chunks()` 可接受预计算向量，也可调用注入的 EmbeddingModel；`query(text, top_k)` 使用相同模型生成查询向量并返回 `list[Chunk]`。
-
-`Retriever` 是 Tool 与存储实现之间的服务层。它接收查询文本和 `top_k`，委托 ChromaStore 检索并返回 Chunk，使 Tool 不依赖 Chroma 的集合、向量和持久化细节。
-
-### `KnowledgeRetrievalTool`
-
-`KnowledgeRetrievalTool` 注册名为 `retrieve_knowledge`，参数为必填 `query` 和默认值为 5 的可选 `top_k`。成功时返回统一 Observation：
-
-```json
-{
-  "success": true,
-  "tool": "retrieve_knowledge",
-  "query": "AI model pricing",
-  "result_count": 2,
-  "results": [
-    {
-      "chunk_id": "...",
-      "document_id": "...",
-      "text": "...",
-      "metadata": {}
-    }
-  ]
-}
-```
-
-参数非法、工具不存在或底层检索异常时，沿用 Agent 已有 Tool 错误路径产生 `tool_error`，下一轮仍可恢复。
-
-## 3. 数据流
-
-知识入库仍需独立调用方显式执行：
-
-```text
-Document / Document.from_source
-    → TextSplitter
-list[Chunk]
-    → EmbeddingModel.embed_documents
-list[Embedding]
-    → ChromaStore.add_chunks
-Chroma Collection
-```
-
-Agent 运行时的查询链路为：
+## 3. 知识读取链
 
 ```text
 LLM decide
@@ -100,57 +45,166 @@ ToolRegistry
     → KnowledgeRetrievalTool
 Retriever
     → ChromaStore.query
-EmbeddingModel + Chroma Collection
-    → list[Chunk]
-KnowledgeRetrievalTool
-    → observation
-Agent 下一轮决策
+    → 只保留当前完整版本
+Chunk Observation
+    → Agent 下一轮决策
 ```
 
-`search_web` 用于知识库缺少资料或需要最新信息的场景；`retrieve_knowledge` 用于复用已入库资料。Prompt 只说明两者边界，不强制任何工具或固定调用顺序。
+`retrieve_knowledge` 用于已有资料，`search_web` 用于知识库缺失或需要最新信息的场景。Prompt 只说明边界，不强制任一工具。检索结果不会自动转成 Source、不会写入 AgentState，也不会自动注入 ContextBuilder。
 
-## 4. 配置与运行模式
+## 4. 自动入库触发时机
 
-真实模式初始化持久化 Chroma、EmbeddingModel 和 Retriever，并将 KnowledgeRetrievalTool 注册到默认 Tool Registry：
+真实模式的顺序是：
+
+```text
+Agent finish
+    → write_report
+    → report.md 成功写入
+    → State 标记 completed
+    → run_completed
+    → KnowledgeIngestionService
+    → KnowledgeIngestionPipeline
+```
+
+只有 `agent.run()` 成功返回后才触发入库。研究失败、报告为空、达到最大轮数或 Demo 模式不会触发。设置 `KNOWLEDGE_AUTO_INGEST=false` 可以关闭自动入库。
+
+入库状态单独写入运行目录的 `knowledge_ingestion.json`，状态包括 `pending`、`running`、`completed`、`partial_failed` 和 `failed`。它不修改 AgentState 的 `completed` 状态。入库异常记录为 `ingestion_error`，已生成的 `report.md` 保持有效，CLI 的研究成功结果也不会因为自动入库失败而改为失败。
+
+## 5. 入库规则
+
+第一版使用确定性规则，不使用 LLM 质量评审。Source 只有同时满足以下条件才会被接受：
+
+- URL 是不带用户凭据的有效 HTTP/HTTPS URL；
+- `via == "read_web"`，证明正文来自网页读取而不是搜索摘要；
+- `content` 非空，不包含 NUL 等明显非文本内容；
+- 规范化正文达到 `KNOWLEDGE_MIN_CONTENT_CHARS`；
+- 正文包含足够的字母、数字或中文等有效字符。
+
+只有 snippet、正文为空、过短、明显非文本或 URL 无效的 Source 会被拒绝。标题中是否出现 `official`、`docs`、`pricing` 不参与准入判断；当前规则不会把第三方资料一律排除，也不会把向量相似度视为可信度。
+
+每个评估结果都记录：
+
+```json
+{
+  "accepted": true,
+  "reason": "valid_full_text",
+  "source_id": "S1",
+  "quality_flags": []
+}
+```
+
+拒绝原因和后续处理结果同样保存在 `knowledge_ingestion.json`。
+
+## 6. Document ID、Content Hash 与 Chunk ID
+
+### 6.1 Document ID
+
+Document ID 表示跨任务稳定的文档身份。URL 规范化只处理可以确定不改变资源身份的差异：
+
+- 协议和主机名转小写；
+- 删除 fragment；
+- 删除 HTTP 80 / HTTPS 443 默认端口；
+- 空路径规范为 `/`；
+- 保留路径、尾部斜杠和全部查询参数。
+
+之后计算：
+
+```text
+document_id = "doc_" + SHA256(normalized_url)
+```
+
+Source ID 只在一次 Agent 运行中唯一，不参与跨任务文档身份判断。
+
+### 6.2 Content Hash
+
+Content Hash 表示内容版本。正文统一换行、压缩行内空白并删除空行后计算：
+
+```text
+content_hash = SHA256(normalized_content)
+```
+
+- Document ID 相同且 Content Hash 相同：`unchanged`；不切分、不 Embedding、不写新向量。
+- Document ID 相同但 Content Hash 不同：`updated`；生成并切换新版本。
+- Document ID 尚不存在：`new`。
+
+### 6.3 Chunk ID 与来源元数据
+
+```text
+chunk_id = document_id + content_hash + chunk_index
+```
+
+相同版本重试会得到相同 Chunk ID，因此 Chroma `upsert` 不会制造重复记录。Chunk metadata 保留 `document_id`、`source_url`、`source_title`、本次运行的 `source_id`、`content_hash`、`retrieved_at`、`ingested_at`、`chunk_index` 和字符范围。完整 metadata 被编码为 JSON 字符串，以符合 Chroma 实际支持的标量 metadata 类型。
+
+## 7. 增量更新与失败恢复
+
+Chroma 不提供本项目所需的跨向量与文件清单数据库事务，因此实现明确采用分阶段写入，而不声称具有数据库级原子事务：
+
+```text
+生成全部 Embedding
+    → 用稳定 Chunk ID stage/upsert 新版本
+    → 回读并校验全部 Chunk ID 已存在
+    → 原子替换版本清单文件
+    → 新版本对 Retriever 可见
+    → 尝试清理旧版本向量
+```
+
+版本清单位于 `KNOWLEDGE_DB_PATH/<collection>.versions.json`。Retriever 以清单中的 `content_hash` 为逻辑可见性依据：
+
+- Embedding 在写入前失败：Chroma 不变，旧版本继续可用；
+- Chroma 部分写入后抛错或完整性校验失败：清单不切换，新 Chunk 不可检索；
+- 程序在 stage 后崩溃：重试使用相同 ID 补写；
+- 清单切换后清理旧向量失败：新版本仍可用，旧版本被查询过滤；后续相同内容重试会再次清理；
+- 清单切换后状态文件尚未更新就崩溃：重试会识别为 `unchanged`，无需再次 Embedding。
+
+这保证旧完整版本不会因新版本写入失败而失效。当前未实现多进程写入锁，因此不要并发运行多个写入同一 Collection 的入库进程。
+
+## 8. 配置
 
 ```env
-LLM_API_KEY=...
-LLM_BASE_URL=
 EMBEDDING_MODEL=text-embedding-3-small
 KNOWLEDGE_DB_PATH=.knowledge/chroma
 KNOWLEDGE_COLLECTION=competitor_knowledge
+KNOWLEDGE_AUTO_INGEST=true
+KNOWLEDGE_MIN_CONTENT_CHARS=200
+KNOWLEDGE_CHUNK_SIZE=500
+KNOWLEDGE_CHUNK_OVERLAP=50
 ```
 
-`.knowledge/` 默认被 Git 忽略。Demo 模式不初始化远程 Embedding 或 Chroma，仍只注册原有四个工具，以保持固定演示流程和离线可运行性。
+`.knowledge/` 被 Git 忽略。更换 Embedding 模型可能改变向量维度或语义空间；当前没有自动迁移机制，应为不兼容模型使用新的 Collection。
 
-## 5. 测试
+## 9. 重试与手动验证
 
-只运行 Knowledge Layer 基础设施测试：
+对已完成运行单独重试入库，不会重新执行 Agent：
 
 ```powershell
-python -m unittest tests.test_knowledge -v
+python main.py --ingest-existing artifacts\<run>\state.json
 ```
 
-只运行 Tool 化检索测试：
+任务 A 入库、任务 B 复用的手动流程：
 
 ```powershell
-python -m unittest tests.test_knowledge_tool -v
+$env:KNOWLEDGE_AUTO_INGEST = "true"
+python main.py --task "调研产品 A 的定位、价格和核心能力" --output-dir artifacts\knowledge-task-a
+Get-Content artifacts\knowledge-task-a\knowledge_ingestion.json
+
+python main.py --task "基于已有知识比较产品 A 的价格与定位，并在资料不足时搜索网页" --output-dir artifacts\knowledge-task-b
+Select-String -Path artifacts\knowledge-task-b\run.jsonl -Pattern 'retrieve_knowledge'
 ```
 
-运行全部测试：
+LLM 自主决定是否调用 `retrieve_knowledge`，因此第二条命令不保证固定调用。需要确定性验证时运行自动化测试：
 
 ```powershell
+python -m unittest tests.test_knowledge_ingestion -v
 python -m unittest discover -s tests -v
+python main.py --demo
 ```
 
-Tool 测试覆盖注册与动态 Schema、默认 `top_k`、统一 Observation、模拟 LLM 选择 `retrieve_knowledge` 后由未改动 Agent Core 完成执行，以及底层异常转换为 `tool_error` 后继续恢复。
+## 10. 已知限制
 
-## 6. 当前边界
-
-- 没有自动 Context 检索；是否查询完全由 LLM 的 Tool Calling 决定。
-- 没有自动知识入库；Document、Chunk 和向量仍由显式流程创建。
-- Chunk 不会自动转成 Source 或写入 AgentState。
-- 检索结果当前作为 Tool Observation 参与后续决策，不会自动进入 ReportContextBuilder 的证据集合。
-- 没有 LangChain、LangGraph 或其他 Agent 编排框架。
-
-这些边界使本阶段只增加知识库访问能力，不改变现有 Agent 的编排与状态语义。
+- 没有知识过期检测、定时刷新或自动重新抓取；`retrieved_at` 只帮助调用方判断新旧。
+- 没有来源冲突消解、事实真实性验证或可信度评分。
+- 向量召回质量依赖 Embedding、Chunk 参数和查询表达，当前没有检索评测集或 reranker。
+- 为保证 staged/旧版本不会挤占 `top_k`，当前查询会读取 Collection 的全部候选后再按版本清单过滤；数据量大时需要改进索引布局。
+- 版本清单使用原子文件替换，但没有跨进程写锁，也不是 Chroma 的数据库事务。
+- 自动入库只处理本次 State 中通过 `read_web` 获得的正文，不自动导入 `retrieve_knowledge` Observation。
+- 没有每轮 Context 自动检索、Long-term Memory、Multi-Agent 或 LLM 入库评审。

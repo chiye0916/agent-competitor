@@ -186,7 +186,7 @@ Runtime 对 `search_web` 查询和 `read_web` URL 生成规范化签名：
 
 `ReportContextBuilder` 只在 Finish 后使用，默认预算 70,000 字符。它优先加入已读取正文，按内容去重并按域名轮换，然后在剩余预算中加入搜索摘要。
 
-两种 Context 都由 Runtime 每次临时构造，没有持久化上下文缓存，也没有向量检索。
+两种 Context 都由 Runtime 每次临时构造，没有持久化上下文缓存或自动向量检索；知识检索只能由 LLM 显式调用 `retrieve_knowledge`。
 
 ## 9. Report Generation
 
@@ -199,9 +199,12 @@ Finish 后的流程为：
 5. 在报告末尾追加 State 中的全部来源及获取时间；
 6. 写入 `report.md`；
 7. 设置 `status="completed"` 和 `report_path`；
-8. 记录 `run_completed` 并保存 State。
+8. 记录 `run_completed` 并保存 State；
+9. Agent 返回后，真实 CLI 按配置执行独立 Knowledge Ingestion。
 
 报告提示词要求使用 `[S1]` 形式引用，但 Runtime 当前不验证引用与结论是否匹配。
+
+入库不属于 `CompetitorAgent.run()` 或任何 Tool，不改变 Agent 的 Finish 语义。它只在报告成功后读取 Sources；异常记录为 `ingestion_error`，不会撤销报告或研究完成状态。
 
 ## 10. Error Handling
 
@@ -236,6 +239,6 @@ Finish 后的流程为：
 - 当前版本未实现 Multi-Agent 协作；
 - 当前版本未实现人类审批节点；
 - 当前版本未实现并行工具调用；
-- 当前版本没有自动 Context RAG、知识自动入库或长期 Memory；只有由 LLM 自主选择的 `retrieve_knowledge` Tool。
+- 当前版本没有自动 Context RAG 或长期 Memory；`retrieve_knowledge` 仍由 LLM 自主选择，自动知识入库只在真实报告成功后作为独立后处理执行。
 
 这些可以作为未来扩展方向，但不属于当前 `CompetitorAgent` 的职责或能力。

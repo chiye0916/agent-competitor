@@ -6,6 +6,18 @@ import os
 from dataclasses import dataclass
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} 必须是 true 或 false")
+
+
 @dataclass
 class Config:
     model: str = "gpt-4.1-mini"
@@ -14,6 +26,10 @@ class Config:
     embedding_model: str = "text-embedding-3-small"
     knowledge_db_path: str = ".knowledge/chroma"
     knowledge_collection: str = "competitor_knowledge"
+    knowledge_auto_ingest: bool = True
+    knowledge_min_content_chars: int = 200
+    knowledge_chunk_size: int = 500
+    knowledge_chunk_overlap: int = 50
     tavily_api_key: str | None = None
     max_rounds: int = 12
     context_char_budget: int = 14_000
@@ -37,6 +53,12 @@ class Config:
             embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
             knowledge_db_path=os.getenv("KNOWLEDGE_DB_PATH", ".knowledge/chroma"),
             knowledge_collection=os.getenv("KNOWLEDGE_COLLECTION", "competitor_knowledge"),
+            knowledge_auto_ingest=_env_bool("KNOWLEDGE_AUTO_INGEST", True),
+            knowledge_min_content_chars=int(
+                os.getenv("KNOWLEDGE_MIN_CONTENT_CHARS", "200")
+            ),
+            knowledge_chunk_size=int(os.getenv("KNOWLEDGE_CHUNK_SIZE", "500")),
+            knowledge_chunk_overlap=int(os.getenv("KNOWLEDGE_CHUNK_OVERLAP", "50")),
             tavily_api_key=os.getenv("TAVILY_API_KEY"),
             max_rounds=int(os.getenv("MAX_ROUNDS", "12")),
             context_char_budget=int(os.getenv("CONTEXT_CHAR_BUDGET", "14000")),

@@ -1,40 +1,26 @@
 # 单 Agent 竞品分析系统
 
-这是一个不用 LangGraph、CrewAI、AutoGen 等编排框架的教学型 MVP。Python harness 自己实现 Planning、函数调用、多轮 Agent Loop、State 持久化、Context 裁剪、Replan、来源保留、可观察日志和最终报告。
+这是一个不依赖 LangChain、LangGraph、CrewAI 或 AutoGen 的教学型单 Agent 竞品研究系统。Python Runtime 自行实现 Planning、Tool Calling、多轮循环、State 持久化、Context 裁剪、Replan、网页研究、知识检索、增量知识入库和最终报告。
 
 ## 项目结构
 
 ```text
-main.py                    CLI 参数解析、依赖初始化和运行入口
-agent/
-├── core.py                CompetitorAgent 与 Agent Loop
-├── state.py               PlanStep、Source、AgentState
-└── context.py             决策 Context 与报告 Context
-llm/
-├── backend.py             LLMBackend 协议
-├── openai_backend.py      OpenAI API 调用实现
-└── prompts.py             LLM 提示词
-tools/
-├── base.py                统一 Tool 接口与轻量参数校验
-├── registry.py            Tool 注册、Schema 发现和执行分发
-├── schemas.py             内置 Tool 的输入 Schema 与描述
-├── research.py            四个内置 Tool、搜索/读取与 URL 安全检查
-└── demo.py                离线模型脚本和网页夹具
-config/settings.py         环境变量与运行配置
-storage/logger.py          JSONL 日志与公共序列化辅助函数
-tests/test_agent.py        无 Key 的可执行测试
-docs/                      当前实现的详细交接文档
-ARCHITECTURE.md            Mermaid 架构图
-SUMMARY.md                 阶段一概念总结
-.env.example               配置模板
-artifacts/demo/            离线完整运行的状态、日志和报告
+main.py                 CLI、依赖装配、报告完成后的入库触发
+agent/                  Agent Loop、State、Context
+llm/                    LLM 协议、OpenAI 后端和 Prompts
+tools/                  BaseTool、Registry、研究与知识检索工具
+knowledge/              Document/Chunk、策略、评估和入库 Pipeline
+embedding/              Embedding 抽象与 OpenAI 实现
+retrieval/              ChromaStore、版本可见性和 Retriever
+config/                 环境变量配置
+storage/                JSONL 日志
+tests/                  离线单元与集成测试
+docs/                   当前实现的详细交接文档
 ```
 
-`main.py` 仍兼容原有的核心类型导入，但不再包含 Agent 业务实现。
+详细架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，Knowledge Layer 见 [docs/KNOWLEDGE.md](docs/KNOWLEDGE.md)。
 
-## 安装
-
-项目使用现有 Conda 环境 `competitor-agent`（Python 3.11），没有新建环境。
+## 安装与配置
 
 ```powershell
 D:\anaconda\Scripts\conda.exe activate competitor-agent
@@ -42,21 +28,23 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-编辑 `.env`：
+至少配置：
 
-- `LLM_API_KEY`：OpenAI 或兼容服务的 Key。
-- `LLM_MODEL`：模型名。模型需要支持 Chat Completions、JSON mode 和 function calling。
-- `LLM_BASE_URL`：使用兼容服务时填写，OpenAI 官方留空。
-- `TAVILY_API_KEY`：Tavily Search API Key。
+- `LLM_API_KEY`：OpenAI 或兼容服务的 Key；
+- `LLM_MODEL`、可选 `LLM_BASE_URL`；
+- `TAVILY_API_KEY`；
+- `EMBEDDING_MODEL`；
+- `KNOWLEDGE_DB_PATH` 和 `KNOWLEDGE_COLLECTION`；
+- `KNOWLEDGE_AUTO_INGEST=true`：真实报告成功后自动增量入库。
 
-`.env` 已被 `.gitignore` 忽略，不要提交真实 Key。
+`.env` 和 `.knowledge/` 已被 Git 忽略，不要提交真实 Key 或本地向量库。
 
 ## 运行
 
-先运行完全离线的演示。它使用固定模型决策和网页夹具，验证 harness 全链路，不代表真实竞品调研：
+离线 Demo 不使用真实 API，也不会读写真实知识库：
 
 ```powershell
-python main.py --demo --output-dir artifacts/demo
+python main.py --demo --output-dir artifacts\demo
 ```
 
 真实调研：
@@ -68,42 +56,44 @@ python main.py --task "调研并比较 Cursor、Claude Code、Codex 的定位、
 从中断状态恢复：
 
 ```powershell
-python main.py --resume artifacts/<run>/state.json
+python main.py --resume artifacts\<run>\state.json --max-rounds 40
 ```
 
-每次运行输出：
+对已完成运行单独重试知识入库，不重新运行研究任务：
 
-- `state.json`：每轮持久化的任务状态；
-- `run.jsonl`：完整逐轮日志；
-- `report.md`：带 `[S1]` 引用和来源清单的最终报告。
+```powershell
+python main.py --ingest-existing artifacts\<run>\state.json
+```
+
+真实成功运行的目录包含：
+
+- `state.json`：Agent 最新可恢复状态；
+- `run.jsonl`：完整事件日志；
+- `report.md`：最终报告；
+- `knowledge_ingestion.json`：独立的入库状态、评估、统计和错误。
+
+## Tool 与 Knowledge 流程
+
+真实 Registry 注册 `search_web`、`read_web`、`retrieve_knowledge`、`replan` 和 `finish`。LLM 每轮自主选择一个 Tool；`retrieve_knowledge` 不会自动执行，也没有自动 Context RAG。
+
+报告成功后，独立入库 Pipeline 会评估本次 `read_web` 正文。符合规则的 Source 使用规范化 URL 生成稳定 Document ID，使用正文 SHA256 识别内容版本，再切分、Embedding 并写入 Chroma。相同版本不会重复 Embedding；更新版本完整写入后才通过原子版本清单切换为可检索状态。入库失败不会使已经生成的报告或 `completed` AgentState 失效。
 
 ## 测试
 
-测试不需要 API Key 或网络：
+测试使用确定性 Embedding、临时 Chroma 和故障注入，不调用收费 API：
 
 ```powershell
+python -m unittest tests.test_knowledge_ingestion -v
 python -m unittest discover -s tests -v
+python main.py --demo
 ```
 
-覆盖多轮循环、四个内置 Tool、动态 Tool 注册、输入校验与错误恢复、模型驱动的步骤完成、Replan、状态持久化、Context 事件窗口与字符预算、报告和来源生成。真实 LLM 与 Tavily 调用必须配置有效 Key 后单独验证。
-
-## Tool Framework
-
-所有可被 Agent 调用的工具都继承 `BaseTool`，并在同一个类上声明名称、描述、输入 Schema 和执行逻辑。`ToolRegistry` 按注册顺序动态生成 OpenAI Function Calling Schema，在执行前校验参数，再把调用分发给目标 Tool。普通 Tool 只返回自己的 Observation；Registry 统一返回 `(ends_run, observation)`，默认仅 `FinishTool` 会结束循环。
-
-新增普通工具不需要修改 `CompetitorAgent._execute()`：实现 `BaseTool` 后调用 `registry.register(tool)` 即可。当前默认 Registry 注册 `search_web`、`read_web`、`replan` 和 `finish`，其名称、参数和返回结果与重构前一致。
-
-## 为什么不是硬编码流程？
-
-真实模式下，harness 只提供四种能力及安全边界，不规定固定竞品分析顺序。每轮模型根据当前 Context 通过 function calling 自主选择 `search_web`、`read_web`、`replan` 或 `finish`，并决定查询词、URL 和对应计划步骤。`--demo` 的固定决策仅是无需 Key 的确定性验收夹具。
-
-每次搜索或读取成功后，系统会再调用一次模型做独立进度审查，而不是由工具调用直接宣告步骤完成。Context 包含全部来源的精简索引，正文则优先选择近期、已读取且疑似官方的来源。相同搜索或 URL 最多执行两次；重复动作达到阈值后，harness 会拒绝执行并强制 Replan。
-
-最终报告使用独立的 Report Context：对已读取网页正文去重，按来源域名轮换以保证不同竞品都能获得证据空间，并优先发送较长正文；只有剩余预算才加入搜索摘要。默认报告预算为 `REPORT_CONTEXT_CHAR_BUDGET=70000`，不会增加每一轮决策的 Context 成本。
+覆盖 Agent Loop、Tool Registry、RAG Tool、入库过滤、幂等、内容更新、Embedding 失败、Chroma 部分写入恢复、跨任务检索和报告失败隔离。
 
 ## 已知边界
 
-- 网页读取器面向普通 HTML/文本，不执行 JavaScript，也不解析 PDF。
-- 默认搜索实现仅接入 Tavily；其他研究工具或未来的 MCP 适配器可通过 `BaseTool` 注册。
-- Context 使用简单字符预算，不是精确 token 计数。
-- Tool error 会写入状态并进入下一轮，但 MVP 未实现指数退避。
+- 网页读取器不执行 JavaScript，也不解析 PDF；
+- 知识库没有自动过期、定时刷新、来源冲突消解或事实真实性验证；
+- 向量召回质量依赖 Embedding、Chunk 参数和查询表达；
+- 版本清单没有多进程写锁，大规模 Collection 的版本过滤仍需优化；
+- 当前没有 Long-term Memory、Multi-Agent 或自动 Context 检索。

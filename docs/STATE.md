@@ -15,7 +15,7 @@ State 解决的是同一个运行中的连续执行与恢复问题：
 - 哪些动作发生重复；
 - 最终报告是否已经生成。
 
-它不是长期 Memory、对话记忆库或 RAG 索引。第三阶段的 Chroma 由 `retrieve_knowledge` Tool 查询，但仍独立于 AgentState，不会自动读取或回写 State。
+它不是长期 Memory、对话记忆库或 RAG 索引。第三阶段的 Chroma 由 `retrieve_knowledge` Tool 查询；报告成功后的 Pipeline 会读取 `state.sources` 作为一次性入库输入，但不会回写或扩展 AgentState。
 
 ## 2. `AgentState` 完整字段
 
@@ -95,6 +95,7 @@ class Source:
 | Decision Context | 从 State 选择出的有限模型输入 | 每轮重新构造，不单独落盘 | 决定下一步 Action、评估进度 |
 | Report Context | 面向最终综合的较大证据输入 | Finish 后构造，不单独落盘 | 生成最终报告 |
 | `run.jsonl` | 全部事件逐行追加 | 整个运行历史 | 观察与审计，不用于完整恢复 |
+| `knowledge_ingestion.json` | 入库阶段、逐 Source 评估、版本结果和错误 | 报告成功后独立覆盖，可安全重试 | Knowledge Pipeline 恢复与审计 |
 
 `recent_events` 最多保存 20 条；`ContextBuilder` 实际只取其中最后 6 条，并将每条详情压缩到约 350 字符。完整过程应查看 `run.jsonl`，而不是只看 `state.json`。
 
@@ -144,7 +145,7 @@ class Source:
 - 当前版本未实现跨任务长期 Memory；
 - 当前版本未实现 conversation memory；
 - 当前版本未实现 memory database；
-- 当前版本未实现接入 AgentState 的 vector memory 或自动 Context RAG；Embedding/Chroma 仅通过 Tool Observation 进入 Agent 事件链；
+- 当前版本未实现接入 AgentState 的 vector memory 或自动 Context RAG；知识库读取通过 Tool Observation，写入则在报告完成后独立执行；
 - 当前版本未实现结构化事实表或持久化证据矩阵；
 - 当前版本未实现 State 版本迁移框架；旧状态仅依靠 dataclass 默认字段兼容缺少的新字段。
 
@@ -160,4 +161,4 @@ class Source:
 | `Document` | Knowledge Layer | 表示进入知识系统前的完整原始文档，可由 `Document.from_source()` 显式转换 |
 | `Chunk` | Knowledge Layer | 表示切分后用于 Embedding 和 Chroma 索引的文本片段 |
 
-新增 Knowledge 类型没有替换或修改 `Source`。当前也没有自动把 `state.sources` 导入 Chroma；转换、切分和索引必须由独立调用方显式执行。`retrieve_knowledge` 返回的 Chunk 不会自动转成 Source 或写入 State。
+新增 Knowledge 类型没有替换或修改 `Source`。真实报告成功后，Pipeline 会评估 `state.sources`，只把具有有效 URL、`read_web` 正文且达到质量阈值的 Source 转为 Document；搜索摘要不会入库。`retrieve_knowledge` 返回的 Chunk 仍不会自动转成 Source 或写入 State。入库的 `pending/running/completed/partial_failed/failed` 与 AgentState 的研究状态完全分离。
