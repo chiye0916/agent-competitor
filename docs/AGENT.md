@@ -25,7 +25,7 @@
 11. 写入终端日志和 `run.jsonl`；
 12. 控制最大轮数和结束条件；
 13. 使用 `ReportContextBuilder` 构造最终报告 Context；
-14. 调用 LLM 生成 Markdown 报告并附加来源清单。
+14. 调用 LLM 生成 Markdown 报告，校验模型选择的证据 ID，并由程序追加来源清单。
 
 ## 3. Agent Loop
 
@@ -108,7 +108,7 @@ Runtime 读取公开网页并保存可见文本。读取器会拒绝非 HTTP(S)�
 }
 ```
 
-知识库缺少资料或任务要求最新信息时，应使用 `search_web`。检索异常沿用现有 Tool 错误路径记录为 `tool_error`，Agent 可以在下一轮恢复。检索结果不会自动写入 `Source`，也不会触发自动 Context 检索。
+知识库缺少资料或任务要求最新信息时，可由 LLM 自主选择 `search_web`。检索异常沿用现有 Tool 错误路径记录为 `tool_error`，Agent 可以在下一轮恢复。检索结果不会转成 `Source`，也不会触发自动 Context 检索；成功返回的每个 Chunk 会转成当前任务的 `RetrievedEvidence`，按 `chunk_id` 去重后持久化到 State，并获得 `E1`、`E2`……内部 ID。
 
 ### 4.4 `replan`
 
@@ -126,7 +126,7 @@ Runtime 保留已完成步骤，用新步骤替换全部未完成步骤，并增
 - `reason`
 - `completed_step_ids`
 
-如果至少已有一个来源，Runtime 接受 Finish，更新可匹配的计划步骤，然后进入最终报告生成。当前没有额外的结构化覆盖门禁。
+如果至少已有一个网页 `Source` 或知识 `RetrievedEvidence`，Runtime 接受 Finish，更新可匹配的计划步骤，然后进入最终报告生成。当前没有额外的结构化覆盖门禁。
 
 ## 5. Planning
 
@@ -141,7 +141,7 @@ Planning 是模型生成的研究导航，不是固定工作流，也不是任�
 
 ## 6. Progress Assessment
 
-每次 `search_web` 或 `read_web` 成功后，当前代码会调用 `LLMBackend.assess_progress()`。输入包括当前决策 Context 和刚完成的工具 Observation。步骤完成标准是已有证据足以支撑最终报告，不要求先生成中间总结或对比表；最终综合由 `write_report()` 完成。`retrieve_knowledge` 当前只产生 Observation，不自动完成步骤。
+每次 `search_web` 或 `read_web` 成功后，当前代码会调用 `LLMBackend.assess_progress()`。输入包括当前决策 Context 和刚完成的工具 Observation。步骤完成标准是已有证据足以支撑最终报告，不要求先生成中间总结或对比表；最终综合由 `write_report()` 完成。`retrieve_knowledge` 会产生 Observation 并保存 Evidence，但当前不会自动触发步骤进度评估。
 
 模型返回：
 
@@ -180,11 +180,11 @@ Runtime 对 `search_web` 查询和 `read_web` URL 生成规范化签名：
 
 ### 8.1 决策 Context
 
-`ContextBuilder` 负责将完整 State 压缩成每轮输入。默认预算 14,000 字符，包含全部来源索引、有限证据和最近 6 个事件。
+`ContextBuilder` 负责将完整 State 压缩成每轮输入。默认预算 14,000 字符，包含任务级 `knowledge_mode`、全部网页来源索引、预算内网页证据、预算内知识 Evidence 和最近 6 个事件。`existing` 模式优先放入知识 Evidence；`latest` 模式优先放入本次网页证据。
 
 ### 8.2 报告 Context
 
-`ReportContextBuilder` 只在 Finish 后使用，默认预算 70,000 字符。它优先加入已读取正文，按内容去重并按域名轮换，然后在剩余预算中加入搜索摘要。
+`ReportContextBuilder` 只在 Finish 后使用，默认预算 70,000 字符。它加入已读取正文、搜索摘要和本次任务实际召回的知识 Evidence；网页正文按内容去重并按域名轮换。`existing` 和 `latest` 使用相反的知识/网页加入优先级，但都受同一个字符预算约束。
 
 两种 Context 都由 Runtime 每次临时构造，没有持久化上下文缓存或自动向量检索；知识检索只能由 LLM 显式调用 `retrieve_knowledge`。
 
@@ -196,13 +196,17 @@ Finish 后的流程为：
 2. 记录 `report_context_built`；
 3. 调用 `LLMBackend.write_report()`；
 4. 检查返回内容非空；
-5. 在报告末尾追加 State 中的全部来源及获取时间；
-6. 写入 `report.md`；
-7. 设置 `status="completed"` 和 `report_path`；
-8. 记录 `run_completed` 并保存 State；
-9. Agent 返回后，真实 CLI 按配置执行独立 Knowledge Ingestion。
+5. `ReportCitationRenderer` 删除不存在的内部引用和非证据 URL；
+6. 按正文首次出现顺序把有效 `[S#]` / `[E#]` 转换为 `[1]` / `[2]`；
+7. 从 Context 中的可信 URL 与时间元数据生成 `参考来源`，记录 `report_citations_built`；
+8. 写入 `report.md`；
+9. 设置 `status="completed"` 和 `report_path`；
+10. 记录 `run_completed` 并保存 State；
+11. Agent 返回后，真实 CLI 按配置执行独立 Knowledge Ingestion。
 
-报告提示词要求使用 `[S1]` 形式引用，但 Runtime 当前不验证引用与结论是否匹配。
+报告提示词要求网页事实使用真实 `[S#]`、知识事实使用真实 `[E#]`。最终编号、标题、URL、获取时间以及知识证据的 Document/Chunk/Content Hash 映射由程序生成，因此模型不能凭空增加引用 URL。当前只实现证据级引用：Runtime 校验证据 ID 是否存在，但不判断某个 Evidence 是否真的支持某一句 Claim。
+
+任务级 `knowledge_mode` 默认为 `existing`；CLI 可用 `--knowledge-mode latest` 显式选择，创建新任务时也会识别任务中的明确新鲜度表达。两种模式只改变提供给 LLM 的策略和 Context 优先级，不在 Agent Loop 中硬编码 Tool 顺序，也不根据 `retrieved_at` 或 `ingested_at` 自动联网。
 
 入库不属于 `CompetitorAgent.run()` 或任何 Tool，不改变 Agent 的 Finish 语义。它只在报告成功后读取 Sources；异常记录为 `ingestion_error`，不会撤销报告或研究完成状态。
 

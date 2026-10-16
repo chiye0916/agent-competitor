@@ -270,7 +270,7 @@ Expecting ',' delimiter: line 1 column 1070 (char 1069)
 - Round 7 改用 `search_web`，Round 8 用 `read_web` 读取官方价格页，Round 9 `finish`；
 - AgentState 最终为 `completed`，生成 13,341 字节的 `report.md`，证明 Tool 限流没有使整个 Agent 失败。
 
-最终 `report_context_built` 只包含网页 Source：Primary 为 S3，Supplemental 为 S1、S2、S4、S5。虽然知识 Tool 已成功召回 Chunk，但检索结果不会转为 Source，因此未直接进入最终 `ReportContextBuilder`。
+该次运行发生在 Step 4.1 之前；当时最终 `report_context_built` 只包含网页 Source：Primary 为 S3，Supplemental 为 S1、S2、S4、S5。虽然知识 Tool 已成功召回 Chunk，但旧实现不会保存 Evidence，因此未直接进入最终 `ReportContextBuilder`。这是历史运行事实，不代表当前代码行为。
 
 ### 6.3 限流后入库重试与幂等验证
 
@@ -284,11 +284,11 @@ python main.py --ingest-existing artifacts\knowledge-task-b-2\state.json
 
 当前 `.knowledge/chroma/competitor_knowledge.versions.json` 有 4 篇活跃文档，Chunk 数为 `13 + 2 + 16 + 4 = 35`。
 
-### 6.4 本次验证确认的 Step 4 输入
+### 6.4 本次验证确认的后续输入与 Step 4.1 状态
 
 - `retrieve_knowledge` 不在当前重复动作签名中，相同/相近查询在短时间内重复请求 Embedding；
 - Retriever 没有查询缓存、`Retry-After`/429 退避或提供商级限速；
-- 成功召回的 Chunk 只是 Tool Observation，不会进入 `state.sources` 和最终报告 Context；
+- Step 4.1 已把成功召回的 Chunk 保存为独立 `RetrievedEvidence`，不会混入 `state.sources`，但会进入当前任务的决策和报告 Context；
 - 通用 Embedding 适配器没有传递 Voyage 建议的 `input_type=query/document`。
 
-这些是实测暴露的后续优化输入，本次只记录现状，没有修改 Agent Loop、Retriever 或 Report Context。
+Step 4.1 还加入了程序化证据引用和用户主动的 `existing/latest` 模式，但没有修改 Agent Loop 或 Retriever 核心参数。重复查询、429 恢复、Voyage 原生 `input_type` 和召回质量仍属于后续 Step 4.2/4.3 输入。

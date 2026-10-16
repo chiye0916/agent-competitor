@@ -28,7 +28,8 @@ flowchart TD
     KT --> RET[Retriever]
     RET --> VS[(ChromaStore)]
     VS --> KT
-    KT --> O
+    KT --> E[RetrievedEvidence<br/>state.json]
+    E --> O
     RP --> O
     FN --> O
     O --> PA[LLM assess_progress<br/>仅 search/read 成功后]
@@ -37,7 +38,8 @@ flowchart TD
     S -->|下一轮| C
     O -->|finished| RC[ReportContextBuilder]
     RC --> WR[LLM write_report]
-    WR --> R[report.md + 来源清单]
+    WR --> CR[ReportCitationRenderer<br/>校验 ID + 程序生成来源]
+    CR --> R[report.md + 可追溯引用]
     R --> KIS[KnowledgeIngestionService<br/>仅真实成功运行]
     KIS --> KE[KnowledgeEvaluator]
     KE --> DOC[Document]
@@ -71,6 +73,7 @@ competitor-agent/
 ├── agent/
 │   ├── __init__.py
 │   ├── core.py
+│   ├── evidence.py
 │   ├── state.py
 │   └── context.py
 ├── llm/
@@ -113,9 +116,10 @@ competitor-agent/
 
 | 文件 | 类/对象 | 当前职责 |
 |---|---|---|
-| `main.py` | `parse_args`、`main` | 解析 CLI、装配 Agent 与共享知识服务；报告成功后触发自动入库，并支持从已完成 State 单独重试 |
+| `main.py` | `parse_args`、`main` | 解析 CLI（包括任务级知识模式）、装配 Agent 与共享知识服务；报告成功后触发自动入库，并支持从已完成 State 单独重试 |
 | `config/settings.py` | `Config` | 从 `.env` 读取 LLM、Embedding、知识库、入库策略、轮数、Context 预算和 HTTP 配置 |
-| `agent/state.py` | `PlanStep`、`Source`、`AgentState` | 保存计划步骤、来源和最新可恢复状态，并负责 JSON 序列化 |
+| `agent/state.py` | `PlanStep`、`Source`、`AgentState` | 保存计划步骤、网页来源、知识模式、当前任务 Evidence 和最新可恢复状态，并负责 JSON 序列化 |
+| `agent/evidence.py` | `RetrievedEvidence`、`ReportCitationRenderer` | 表示本次任务实际召回的知识证据；校验内部 ID、过滤非证据 URL，并生成可追溯引用 |
 | `agent/context.py` | `ContextBuilder`、`ReportContextBuilder` | 将 State 转换为有限决策 Context 或较丰富的报告 Context，不调用 LLM |
 | `agent/core.py` | `CompetitorAgent` | 编排组件，通过 Registry 执行 Action，保持原有 Agent Loop、状态持久化和报告落盘 |
 | `llm/backend.py` | `LLMBackend`、`LLMResponseError` | 规定五类 LLM 能力接口，并提供可恢复响应格式错误类型 |
@@ -124,7 +128,7 @@ competitor-agent/
 | `tools/base.py` | `BaseTool`、`ToolValidationError` | 定义统一 Tool 接口、生成单个 Function Schema 并执行轻量输入校验 |
 | `tools/registry.py` | `ToolRegistry`、`build_default_registry` | 注册 Tool、动态汇总 Schema、校验并分发执行；真实模式传入 Retriever 时组装五个工具 |
 | `tools/schemas.py` | 描述与输入 Schema 常量 | 保存五个内置 Tool 的参数契约，不再维护静态工具列表 |
-| `tools/knowledge.py` | `KnowledgeRetrievalTool` | 把 `retrieve_knowledge` 暴露给 LLM，并把 Retriever 结果转换为统一 Observation |
+| `tools/knowledge.py` | `KnowledgeRetrievalTool` | 把 `retrieve_knowledge` 暴露给 LLM，把 Chunk 转为当前任务 Evidence，并返回带来源元数据的统一 Observation |
 | `tools/research.py` | `SearchWebTool`、`ReadWebTool`、`ReplanTool`、`FinishTool`、`ResearchTools` | 实现四个可执行 Tool；底层研究客户端负责 Tavily、URL 安全检查和网页读取 |
 | `tools/demo.py` | `DemoLLMBackend`、`DemoResearchTools` | 提供固定动作脚本和 Alpha/Beta 离线网页夹具 |
 | `storage/logger.py` | `RunLogger`、`utc_now`、`compact` | 将事件追加到 `run.jsonl`、输出压缩终端日志，并提供时间/压缩辅助函数 |
@@ -209,12 +213,13 @@ stateDiagram-v2
 
 - `source_catalog` 列出全部来源；
 - `primary_evidence` 放已读取的正文；
+- `retrieved_evidence` 放本次任务中实际由 Tool 召回并持久化的知识 Chunk；
 - 相同正文按 SHA-256 去重；
 - 来源按基础域名分组并轮换加入；
 - 单个正文最多 7,000 字符；
 - 剩余预算用于 `supplemental_evidence` 搜索摘要，每项最多 900 字符。
 
-这两个 Builder 都直接操作普通 Python 字典，没有向量检索、语义检索或 Context 数据库。
+这两个 Builder 都直接操作普通 Python 字典，不会自行发起向量检索、语义检索或 Web Search。只有 LLM 选择 `retrieve_knowledge` 后已写入 State 的 Evidence 才能进入 Context。
 
 ## 8. Tool Calling 如何工作
 
@@ -287,16 +292,19 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 
 模型选择 `finish` 后：
 
-1. Runtime 检查至少有一个 Source；
+1. Runtime 检查至少有一个网页 Source 或知识 Evidence；
 2. 更新模型声明完成的步骤；
 3. 退出 Agent Loop；
 4. 构造 Report Context；
 5. 调用 LLM 写报告；
-6. 追加全部来源 Markdown 列表；
-7. 写 `report.md`，更新 State 并记录 `run_completed`；
-8. 真实模式且 `KNOWLEDGE_AUTO_INGEST=true` 时，在 Agent 返回后执行独立入库。
+6. Runtime 只接受报告 Context 中真实存在且被模型写入正文的 `[S#]` / `[E#]`；
+7. 有效内部 ID 按首次出现顺序转换为数字引用，来源 URL 和时间由程序从 Source/Evidence 元数据生成；
+8. 写 `report.md`，记录 `report_citations_built`，更新 State 并记录 `run_completed`；
+9. 真实模式且 `KNOWLEDGE_AUTO_INGEST=true` 时，在 Agent 返回后执行独立入库。
 
 入库不位于 Agent Loop 内。失败时记录 `ingestion_error` 和独立状态，不回滚报告、不把 AgentState 从 `completed` 改为 `failed`。报告生成不是另一个 Agent，也没有独立的审稿循环。
+
+新任务的 `knowledge_mode` 默认为 `existing`；可用 `--knowledge-mode latest` 显式覆盖，也可由任务中的明确新鲜度词触发。该字段随 State 持久化并进入两种 Context。`latest` 允许 LLM 自主使用 Web Tool 核验时效事实，但 Runtime 不按证据年龄自动调用工具、不刷新知识库，也不规定固定的 RAG → Search → Read 顺序。
 
 ## 12. 配置与依赖
 
@@ -333,6 +341,6 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 - JSONL 没有代码版本和单次 CLI invocation ID，且 `progress_assessment` 事件本身不含轮次字段；
 - 没有服务端 API、Web UI、鉴权或多租户隔离；
 - 没有异步 Worker 或分布式执行；
-- 没有自动 Context RAG、知识刷新、事实可信度判断、长期 Memory 或 Multi-Agent；当前自动入库只发生在真实报告成功之后。
+- 没有自动 Context RAG、自动知识刷新、Claim-Level Citation、事实可信度判断、自动化 RAG Evaluation、长期 Memory 或 Multi-Agent；当前自动入库只发生在真实报告成功之后。
 
 上述均可作为未来扩展方向，但不属于当前架构。

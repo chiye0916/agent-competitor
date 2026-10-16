@@ -2,11 +2,13 @@
 
 ## 1. 当前能力与边界
 
-Knowledge Layer 目前包含三条相互独立的职责链：
+Knowledge Layer 目前包含三条相互独立的职责链，并由 Agent 层补充当前任务 Evidence：
 
 1. Document、Chunk、TextSplitter、Embedding 与 Chroma 基础设施；
 2. 由 LLM 自主选择的 `retrieve_knowledge` Tool 检索链；
 3. 真实研究报告成功落盘后的自动知识入库链。
+
+`Knowledge` 是 Chroma 中可跨任务复用的长期资料；`RetrievedEvidence` 是本次任务由 `retrieve_knowledge` 实际召回的 Chunk 快照；`Source` 是当前任务搜索或读取到的网页来源。三者不会互相替代。
 
 自动入库发生在 Agent Loop 和报告生成之后，不改变 Planning、Replan、Finish、State 或 Tool Calling。它不是每轮自动 RAG，也不是 Long-term Memory。Demo 不初始化真实知识库，不执行自动入库。
 
@@ -32,6 +34,9 @@ retrieval/
 
 tools/
 └── knowledge.py      # retrieve_knowledge Tool
+
+agent/
+└── evidence.py       # 当前任务 Evidence 与程序化 Citation
 ```
 
 `KnowledgeEvaluator` 不调用 LLM、Embedding 或 Chroma，也不修改 AgentState。`KnowledgeIngestionPipeline` 复用 `Document.from_source()`、TextSplitter、EmbeddingModel 和 ChromaStore，不复制已有能力。
@@ -47,10 +52,33 @@ Retriever
     → ChromaStore.query
     → 只保留当前完整版本
 Chunk Observation
-    → Agent 下一轮决策
+    → RetrievedEvidence（state.json）
+    → Agent 下一轮决策 / ReportContextBuilder
 ```
 
-`retrieve_knowledge` 用于已有资料，`search_web` 用于知识库缺失或需要最新信息的场景。Prompt 只说明边界，不强制任一工具。检索结果不会自动转成 Source、不会写入 AgentState，也不会自动注入 ContextBuilder。
+`retrieve_knowledge` 用于已有资料，`search_web` 用于知识库缺失或需要最新信息的场景。Prompt 只说明边界，不强制任一工具。检索结果不会转成 Source，也不会触发自动检索；Tool 会把实际返回的每个 Chunk 转为 `RetrievedEvidence`，按 `chunk_id` 去重、分配 `E#`，保存到 AgentState，之后由 ContextBuilder 正常读取。
+
+### 3.1 Evidence 来源链
+
+每个 `RetrievedEvidence` 至少保存 `chunk_id`、`document_id`、正文、`source_url` 和 `source_title`，并复用现有 Chunk metadata 中的 `source_id`、`content_hash`、`retrieved_at`、`ingested_at`。因此可以沿以下链路反向审计：
+
+```text
+E# → RetrievedEvidence → Chunk ID → Document ID → Source ID / Source URL
+```
+
+Evidence 只来自本次任务实际得到的 Chunk，不会扫描或自动引用知识库中未召回的其他文档。
+
+### 3.2 报告引用
+
+报告模型对网页证据写内部 `[S#]`，对知识证据写内部 `[E#]`。`ReportCitationRenderer` 只接受本次 Report Context 中真实存在、具有 HTTP(S) URL 且被模型实际写入正文的 ID；随后按首次出现顺序转换为 `[1]`、`[2]`，并从系统数据追加标题、URL、获取时间以及知识证据的 Document/Chunk/Content Hash。不存在的 ID 和模型输出的非证据 URL 会被移除。
+
+这是 Evidence-level Citation，不是 Claim-Level Citation：程序能证明引用指向哪条 Evidence，但不自动判断该 Evidence 是否充分支持具体句子。
+
+### 3.3 任务级新鲜度模式
+
+`knowledge_mode=existing` 是默认值：优先复用已有知识，不因为 `retrieved_at` 或 `ingested_at` 较早就自动联网。用户可通过 `--knowledge-mode latest` 显式选择，或在新任务中明确写“最新”“当前”“截至今天”“实时”“检查最新信息”“重新核实”等要求，由 CLI 推断为 `latest`。
+
+`latest` 会进入决策和报告 Context，并让本次有效网页 Source 优先于旧知识 Evidence；它只是授权 LLM 自主判断是否调用 `search_web` / `read_web`，不会强制工具顺序、按天数触发搜索、定时刷新或改动 Step 3 的版本管理。
 
 ## 4. 自动入库触发时机
 
@@ -203,6 +231,8 @@ Get-Content artifacts\knowledge-task-a\knowledge_ingestion.json
 
 python main.py --task "优先查询已有知识，总结并分析 2Cshop 的价格方案与产品定位；如果知识库资料不足，再搜索网页" --output-dir artifacts\knowledge-task-b-2 --max-rounds 20
 Select-String -Path artifacts\knowledge-task-b-2\run.jsonl -Pattern 'retrieve_knowledge'
+
+python main.py --task "核实 2Cshop 当前价格" --knowledge-mode latest
 ```
 
 LLM 自主决定是否调用 `retrieve_knowledge`，因此第二条命令不保证固定调用。需要确定性验证时运行自动化测试：
@@ -232,7 +262,7 @@ python main.py --ingest-existing artifacts\knowledge-task-b-2\state.json
 - 向量召回质量依赖 Embedding、Chunk 参数和查询表达，当前没有检索评测集或 reranker。
 - 为保证 staged/旧版本不会挤占 `top_k`，当前查询会读取 Collection 的全部候选后再按版本清单过滤；数据量大时需要改进索引布局。
 - 版本清单使用原子文件替换，但没有跨进程写锁，也不是 Chroma 的数据库事务。
-- 自动入库只处理本次 State 中通过 `read_web` 获得的正文，不自动导入 `retrieve_knowledge` Observation。检索到的 Chunk 也不会转为 Source，因此当前不会进入只读取 `state.sources` 的 `ReportContextBuilder`。
+- 自动入库只处理本次 State 中通过 `read_web` 获得的正文，不会把 `retrieve_knowledge` 返回的 Evidence 再次入库。Evidence 不转成 Source，但会单独进入 Decision/Report Context。
 - `retrieve_knowledge` 尚未纳入重复动作保护，也没有查询缓存、429 退避或提供商级速率控制；相同/相近查询可能在短时间内重复请求 Embedding。
 - 当前通用 `OpenAIEmbedding` 调用未传递 Voyage 的 `input_type=query/document`，功能已验证可用，但还不是面向 Voyage 检索质量的原生适配。
-- 没有每轮 Context 自动检索、Long-term Memory、Multi-Agent 或 LLM 入库评审。
+- 没有每轮 Context 自动检索、自动知识刷新、Claim-Level Citation、自动化 RAG Evaluation、Long-term Memory、Multi-Agent 或 LLM 入库评审。

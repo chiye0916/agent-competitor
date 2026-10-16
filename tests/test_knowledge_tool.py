@@ -22,7 +22,14 @@ class FakeRetriever:
                 id="doc-pricing:chunk:0",
                 document_id="doc-pricing",
                 text="Historical AI model pricing evidence",
-                metadata={"title": "Pricing archive", "url": "https://example.com/archive"},
+                metadata={
+                    "source_title": "Pricing archive",
+                    "source_url": "https://example.com/archive",
+                    "source_id": "S4",
+                    "content_hash": "hash-pricing",
+                    "retrieved_at": "2026-01-01T00:00:00+00:00",
+                    "ingested_at": "2026-01-02T00:00:00+00:00",
+                },
             )
         ][:top_k]
 
@@ -87,7 +94,13 @@ class KnowledgeToolTests(unittest.TestCase):
         self.assertTrue(observation["success"])
         self.assertEqual(observation["tool"], "retrieve_knowledge")
         self.assertEqual(observation["result_count"], 1)
+        self.assertEqual(observation["results"][0]["evidence_id"], "E1")
         self.assertEqual(observation["results"][0]["document_id"], "doc-pricing")
+        self.assertEqual(
+            observation["results"][0]["source_url"],
+            "https://example.com/archive",
+        )
+        self.assertEqual(state.retrieved_evidence[0].chunk_id, "doc-pricing:chunk:0")
         self.assertEqual(retriever.calls, [("AI model pricing", 5)])
 
     def test_agent_executes_retrieve_knowledge_without_core_changes(self):
@@ -126,6 +139,7 @@ class KnowledgeToolTests(unittest.TestCase):
             self.assertTrue(results[0]["observation"]["success"])
             self.assertEqual(state.status, "completed")
             self.assertEqual(retriever.calls, [("AI model pricing", 3)])
+            self.assertEqual([item.id for item in state.retrieved_evidence], ["E1"])
 
     def test_retrieval_failure_becomes_tool_error_and_agent_recovers(self):
         with tempfile.TemporaryDirectory() as tmp:

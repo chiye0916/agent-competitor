@@ -11,7 +11,8 @@ from pathlib import Path
 # while all implementation now lives in focused modules.
 from agent.context import ContextBuilder, ReportContextBuilder
 from agent.core import CompetitorAgent
-from agent.state import AgentState, PlanStep, Source
+from agent.evidence import ReportCitationRenderer, RetrievedEvidence
+from agent.state import AgentState, PlanStep, Source, infer_knowledge_mode
 from config.settings import Config
 from embedding.openai_embedding import OpenAIEmbedding
 from knowledge.evaluator import KnowledgeEvaluator
@@ -51,6 +52,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, help="本次产物目录")
     parser.add_argument("--max-rounds", type=int, help="覆盖最大轮数")
+    parser.add_argument(
+        "--knowledge-mode",
+        choices=("existing", "latest"),
+        help="任务级知识策略：默认复用已有知识；latest 授权 Agent 检查最新信息",
+    )
     return parser.parse_args(argv)
 
 
@@ -78,9 +84,9 @@ def build_knowledge_services(
 
 
 def ingest_existing(args: argparse.Namespace, config: Config) -> int:
-    if args.demo or args.resume or args.task:
+    if args.demo or args.resume or args.task or args.knowledge_mode:
         print(
-            "错误：--ingest-existing 不能与 --demo、--resume 或 --task 同时使用",
+            "错误：--ingest-existing 不能与 --demo、--resume、--task 或 --knowledge-mode 同时使用",
             file=sys.stderr,
         )
         return 2
@@ -113,13 +119,18 @@ def main(argv: list[str] | None = None) -> int:
         config.max_rounds = args.max_rounds
     if args.resume:
         state = AgentState.load(args.resume)
+        if args.knowledge_mode:
+            state.knowledge_mode = args.knowledge_mode
         run_dir = args.output_dir or args.resume.parent
     else:
         task = args.task or ("比较 Alpha 与 Beta 的定位、定价和适用场景" if args.demo else None)
         if not task:
             print("错误：真实运行必须传入 --task", file=sys.stderr)
             return 2
-        state = AgentState(task=task)
+        state = AgentState(
+            task=task,
+            knowledge_mode=args.knowledge_mode or infer_knowledge_mode(task),
+        )
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         run_dir = args.output_dir or Path("artifacts") / ("demo" if args.demo else stamp)
     llm: LLMBackend = DemoLLMBackend() if args.demo else OpenAIBackend(config)

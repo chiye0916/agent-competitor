@@ -257,8 +257,8 @@ class FinishTool(BaseTool):
         self.state = state
 
     def execute(self, **kwargs: Any) -> dict[str, Any]:
-        if not self.state.sources:
-            raise RuntimeError("尚未收集任何来源，不能 finish")
+        if not self.state.sources and not self.state.retrieved_evidence:
+            raise RuntimeError("尚未收集任何网页来源或知识证据，不能 finish")
         completed = self.state.complete_steps(kwargs.get("completed_step_ids", []))
         return {
             "reason": kwargs["reason"],

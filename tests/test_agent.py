@@ -211,7 +211,9 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(agent.state.round, 6)
             self.assertEqual(agent.state.replan_count, 1)
             self.assertEqual(len(agent.state.sources), 2)
-            self.assertIn("[S1]", report_path.read_text(encoding="utf-8"))
+            report = report_path.read_text(encoding="utf-8")
+            self.assertIn("[1]", report)
+            self.assertIn("URL: https://example.test/alpha", report)
             events = [json.loads(line)["event"] for line in (run_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()]
             tool_results = [
                 json.loads(line)["tool"]
@@ -225,6 +227,7 @@ class AgentTests(unittest.TestCase):
                 ["search_web", "read_web", "replan", "search_web", "read_web", "finish"],
             )
             self.assertIn("report_context_built", events)
+            self.assertIn("report_citations_built", events)
             self.assertIn("run_completed", events)
 
     def test_state_round_trip(self):
@@ -235,6 +238,7 @@ class AgentTests(unittest.TestCase):
             loaded = AgentState.load(path)
             self.assertEqual(loaded.task, "task")
             self.assertEqual(loaded.plan[0].id, "P1")
+            self.assertEqual(loaded.knowledge_mode, "existing")
 
     def test_context_is_bounded_and_only_keeps_recent_events(self):
         state = AgentState(task="task", plan=[PlanStep("P1", "step")])
@@ -451,6 +455,8 @@ class AgentTests(unittest.TestCase):
         loaded = AgentState.from_dict(old)
         self.assertEqual(loaded.action_history, [])
         self.assertEqual(loaded.read_attempts, {})
+        self.assertEqual(loaded.knowledge_mode, "existing")
+        self.assertEqual(loaded.retrieved_evidence, [])
 
     @patch("urllib.request.urlopen")
     def test_search_api_response_is_normalized(self, urlopen):

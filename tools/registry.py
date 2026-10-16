@@ -52,7 +52,7 @@ def build_default_registry(
     registry.register(SearchWebTool(research_tools, state))
     registry.register(ReadWebTool(research_tools, state))
     if retriever is not None:
-        registry.register(KnowledgeRetrievalTool(retriever))
+        registry.register(KnowledgeRetrievalTool(retriever, state))
     registry.register(ReplanTool(state))
     registry.register(FinishTool(state))
     return registry
