@@ -74,7 +74,10 @@ def build_read_only_retriever(config: Config) -> Retriever:
         persist_directory=db_path,
         create_if_missing=False,
     )
-    return Retriever(store)
+    return Retriever(
+        store,
+        relevance_threshold=config.rag_relevance_threshold,
+    )
 
 
 def knowledge_snapshot(retriever: Retriever) -> KnowledgeSnapshot:
@@ -85,11 +88,17 @@ def knowledge_snapshot(retriever: Retriever) -> KnowledgeSnapshot:
     return KnowledgeSnapshot(store.collection.count(), digest)
 
 
-def match_to_record(match: RetrievalMatch, content_chars: int) -> dict[str, Any]:
+def match_to_record(
+    match: RetrievalMatch,
+    content_chars: int,
+    *,
+    accepted: bool,
+) -> dict[str, Any]:
     metadata = match.chunk.metadata
     return {
         "rank": match.rank,
         "distance": match.distance,
+        "threshold_decision": "accepted" if accepted else "rejected",
         "chunk_id": match.chunk.id,
         "document_id": match.chunk.document_id,
         "source_title": metadata.get("source_title")
@@ -121,7 +130,10 @@ def execute_validation(
     for index, case in enumerate(cases):
         if index and delay_seconds:
             time.sleep(delay_seconds)
-        matches = retriever.query_with_distances(str(case["query"]), top_k=top_k)
+        diagnostics = retriever.diagnose(str(case["query"]), top_k=top_k)
+        accepted_keys = {
+            (match.rank, match.chunk.id) for match in diagnostics.accepted_matches
+        }
         records.append(
             {
                 "id": case.get("id"),
@@ -131,7 +143,21 @@ def execute_validation(
                 "expected_topics": list(case.get("expected_topics", [])),
                 "expected_answer_status": case.get("expected_answer_status", "present"),
                 "manual_evaluation": dict(case.get("manual_evaluation") or {}),
-                "results": [match_to_record(match, content_chars) for match in matches],
+                "status": diagnostics.status,
+                "reason": diagnostics.reason,
+                "distance_metric": diagnostics.distance_metric,
+                "relevance_threshold": diagnostics.threshold,
+                "raw_candidate_count": len(diagnostics.raw_matches),
+                "accepted_count": len(diagnostics.accepted_matches),
+                "rejected_count": len(diagnostics.rejected_matches),
+                "results": [
+                    match_to_record(
+                        match,
+                        content_chars,
+                        accepted=(match.rank, match.chunk.id) in accepted_keys,
+                    )
+                    for match in diagnostics.raw_matches
+                ],
             }
         )
     return records
@@ -147,6 +173,19 @@ def format_validation(records: list[dict[str, Any]], distance_metric: str) -> st
             lines.append("期望来源（仅供人工判断）: " + ", ".join(expected))
         elif record.get("expected_answer_status") == "absent":
             lines.append("期望: 知识库无答案；检查是否仍返回貌似相关但不足以回答的 Chunk")
+        threshold = record.get("relevance_threshold")
+        rendered_threshold = "disabled" if threshold is None else f"{threshold:.6f}"
+        lines.extend(
+            [
+                f"状态: {record.get('status')}",
+                f"原因: {record.get('reason')}",
+                f"Threshold: {rendered_threshold}",
+                "Raw / Accepted / Rejected: "
+                f"{record.get('raw_candidate_count', 0)} / "
+                f"{record.get('accepted_count', 0)} / "
+                f"{record.get('rejected_count', 0)}",
+            ]
+        )
         results = record["results"]
         if not results:
             lines.append("结果: 无")
@@ -158,6 +197,7 @@ def format_validation(records: list[dict[str, Any]], distance_metric: str) -> st
                     "",
                     f"Rank {result['rank']}",
                     f"distance ({distance_metric}, 越小越近): {rendered_distance}",
+                    f"threshold decision: {result['threshold_decision']}",
                     f"title: {result['source_title']}",
                     f"url: {result['source_url']}",
                     f"chunk_id: {result['chunk_id']}",
@@ -216,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
                             "collection": config.knowledge_collection,
                             "top_k": args.top_k,
                             "distance_metric": metric,
-                            "similarity_threshold": None,
+                            "similarity_threshold": retriever.relevance_threshold,
                             "business_metadata_filter": None,
                             "active_version_filter": True,
                             "read_only_snapshot": asdict(after),
@@ -231,7 +271,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "当前验证配置："
                 f"Embedding={config.embedding_model}, Collection={config.knowledge_collection}, "
-                f"Top-K={args.top_k}, Distance={metric}, Threshold=None, "
+                f"Top-K={args.top_k}, Distance={metric}, "
+                f"Threshold={retriever.relevance_threshold}, "
                 "Business Metadata Filter=None, Active Version Filter=True"
             )
             print(format_validation(records, metric))

@@ -86,15 +86,18 @@ def source(
     *,
     via: str = "read_web",
     retrieved_at: str = "2026-10-15T00:00:00+00:00",
+    title: str | None = None,
+    http_status: int | None = 200,
 ) -> Source:
     return Source(
         id=source_id,
-        title=f"Title {source_id}",
+        title=title or f"Title {source_id}",
         url=url,
         snippet="search summary only",
         content=text,
         retrieved_at=retrieved_at,
         via=via,
+        http_status=http_status,
     )
 
 
@@ -137,6 +140,114 @@ class KnowledgeIngestionTests(unittest.TestCase):
         self.assertFalse(rejected.accepted)
         self.assertEqual(rejected.reason, "missing_verified_full_text")
         self.assertEqual(normalize_url(full.url), "https://example.com/page")
+
+    def test_http_404_is_rejected_before_embedding(self):
+        pipeline, store, embedding = self.make_pipeline()
+        invalid = source(
+            "S404",
+            "https://example.com/missing",
+            "long fallback body " * 20,
+            http_status=404,
+        )
+
+        result = pipeline.ingest_sources([invalid])
+
+        self.assertEqual(result["rejected"], 1)
+        self.assertEqual(result["evaluations"][0]["reason"], "http_404")
+        self.assertEqual(embedding.document_calls, 0)
+        self.assertEqual(store.collection.count(), 0)
+
+    def test_http_200_not_found_page_is_rejected_before_embedding(self):
+        pipeline, store, embedding = self.make_pipeline()
+        title_error = source(
+            "S1",
+            "https://example.com/missing-title",
+            "Page not found",
+            title="404 Not Found",
+            http_status=200,
+        )
+        body_error = source(
+            "S2",
+            "https://example.com/missing-body",
+            "Site navigation 404错误，找不到您想要的页面。返回首页 " + "footer " * 30,
+            title="Product site",
+            http_status=200,
+        )
+
+        result = pipeline.ingest_sources([title_error, body_error])
+
+        self.assertEqual(result["rejected"], 2)
+        self.assertEqual(
+            [item["reason"] for item in result["evaluations"]],
+            ["not_found_page", "not_found_page"],
+        )
+        self.assertEqual(embedding.document_calls, 0)
+        self.assertEqual(store.collection.count(), 0)
+
+    def test_normal_http_200_page_is_ingested(self):
+        pipeline, store, embedding = self.make_pipeline()
+        valid = source(
+            "S1",
+            "https://example.com/product",
+            "normal product pricing and feature details " * 10,
+            title="Product pricing",
+            http_status=200,
+        )
+
+        result = pipeline.ingest_sources([valid])
+
+        self.assertEqual(result["new"], 1)
+        self.assertGreater(store.collection.count(), 0)
+        self.assertEqual(embedding.document_calls, 1)
+
+    def test_empty_http_200_page_is_rejected_before_embedding(self):
+        pipeline, store, embedding = self.make_pipeline()
+        empty = source(
+            "S1",
+            "https://example.com/empty",
+            "",
+            http_status=200,
+        )
+
+        result = pipeline.ingest_sources([empty])
+
+        self.assertEqual(result["evaluations"][0]["reason"], "empty_content")
+        self.assertEqual(embedding.document_calls, 0)
+        self.assertEqual(store.collection.count(), 0)
+
+    def test_normal_article_that_mentions_404_is_not_rejected(self):
+        pipeline, store, embedding = self.make_pipeline()
+        guide = source(
+            "S1",
+            "https://example.com/http-guide",
+            "本文介绍如何处理 HTTP 404 错误，包括日志分析和路由配置。" * 8,
+            title="HTTP 错误排查指南",
+            http_status=200,
+        )
+
+        result = pipeline.ingest_sources([guide])
+
+        self.assertEqual(result["new"], 1)
+        self.assertEqual(result["evaluations"][0]["reason"], "valid_full_text")
+        self.assertEqual(embedding.document_calls, 1)
+        self.assertGreater(store.collection.count(), 0)
+
+    def test_404_troubleshooting_title_is_not_treated_as_error_page(self):
+        pipeline, store, embedding = self.make_pipeline()
+        guide = source(
+            "S1",
+            "https://example.com/404-guide",
+            "This guide explains the HTTP 404 error and how routing logs help diagnose it. " * 8,
+            title="How to troubleshoot a 404 Error",
+            http_status=200,
+        )
+
+        result = pipeline.ingest_sources([guide])
+
+        self.assertEqual(result["new"], 1)
+        self.assertEqual(result["evaluations"][0]["reason"], "valid_full_text")
+        self.assertEqual(embedding.document_calls, 1)
+        self.assertGreater(store.collection.count(), 0)
 
     def test_normal_ingestion_filters_splits_and_retrieves_sources(self):
         pipeline, store, _ = self.make_pipeline()

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from knowledge.chunk import Chunk
-from retrieval.models import RetrievalMatch
+from retrieval.models import RetrievalDiagnostics, RetrievalMatch
 from scripts.test_retrieval import (
     execute_validation,
     format_validation,
@@ -12,14 +12,33 @@ from scripts.test_retrieval import (
 
 
 class FakeRetriever:
-    def __init__(self, matches):
+    def __init__(self, matches, threshold=None):
         self.matches = list(matches)
+        self.relevance_threshold = threshold
         self.calls = []
         self.mutation_calls = 0
 
-    def query_with_distances(self, text, top_k=5):
+    def diagnose(self, text, top_k=5):
         self.calls.append((text, top_k))
-        return self.matches[:top_k]
+        raw = tuple(self.matches[:top_k])
+        accepted = tuple(
+            item
+            for item in raw
+            if self.relevance_threshold is None
+            or (
+                item.distance is not None
+                and item.distance <= self.relevance_threshold
+            )
+        )
+        rejected = tuple(item for item in raw if item not in accepted)
+        return RetrievalDiagnostics(
+            query=text,
+            distance_metric="cosine",
+            threshold=self.relevance_threshold,
+            raw_matches=raw,
+            accepted_matches=accepted,
+            rejected_matches=rejected,
+        )
 
     def add_chunks(self, *args, **kwargs):
         self.mutation_calls += 1
@@ -70,6 +89,7 @@ class RetrievalValidationTests(unittest.TestCase):
         self.assertEqual(result["document_id"], "doc-a")
         self.assertEqual(result["source_url"], "https://example.com/a")
         self.assertIn("distance (cosine, 越小越近): 0.125000", rendered)
+        self.assertEqual(result["threshold_decision"], "accepted")
 
     def test_result_order_preserves_retriever_ranking(self):
         retriever = FakeRetriever([match(1, 0.4, "first"), match(2, 0.1, "second")])
@@ -95,6 +115,26 @@ class RetrievalValidationTests(unittest.TestCase):
 
         self.assertEqual(records[0]["results"], [])
         self.assertIn("结果: 无", format_validation(records, "cosine"))
+
+    def test_diagnostic_output_shows_threshold_acceptance_and_rejection(self):
+        retriever = FakeRetriever(
+            [match(1, 0.2, "accepted"), match(2, 0.6, "rejected")],
+            threshold=0.4,
+        )
+
+        records = execute_validation(
+            retriever,
+            [{"id": "Q1", "query": "pricing"}],
+            top_k=5,
+            content_chars=100,
+        )
+        rendered = format_validation(records, "cosine")
+
+        self.assertEqual(records[0]["status"], "relevant_knowledge_found")
+        self.assertEqual(records[0]["accepted_count"], 1)
+        self.assertEqual(records[0]["rejected_count"], 1)
+        self.assertIn("threshold decision: accepted", rendered)
+        self.assertIn("threshold decision: rejected", rendered)
 
     def test_validation_is_read_only_and_dataset_has_required_categories(self):
         retriever = FakeRetriever([match(1, 0.1, "a")])

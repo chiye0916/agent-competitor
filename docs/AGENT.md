@@ -102,13 +102,36 @@ Runtime 读取公开网页并保存可见文本。读取器会拒绝非 HTTP(S)�
 {
   "success": true,
   "tool": "retrieve_knowledge",
+  "status": "relevant_knowledge_found",
   "query": "AI model pricing",
+  "reason": "candidates_within_relevance_threshold",
+  "distance_metric": "cosine",
+  "relevance_threshold": 0.5,
+  "raw_candidate_count": 5,
   "result_count": 2,
+  "rejected_count": 3,
   "results": []
 }
 ```
 
-知识库缺少资料或任务要求最新信息时，可由 LLM 自主选择 `search_web`。检索异常沿用现有 Tool 错误路径记录为 `tool_error`，Agent 可以在下一轮恢复。检索结果不会转成 `Source`，也不会触发自动 Context 检索；成功返回的每个 Chunk 会转成当前任务的 `RetrievedEvidence`，按 `chunk_id` 去重后持久化到 State，并获得 `E1`、`E2`……内部 ID。
+无候选通过阈值时：
+
+```json
+{
+  "success": true,
+  "tool": "retrieve_knowledge",
+  "status": "no_relevant_knowledge",
+  "reason": "all_candidates_exceed_relevance_threshold",
+  "distance_metric": "cosine",
+  "relevance_threshold": 0.5,
+  "raw_candidate_count": 5,
+  "result_count": 0,
+  "rejected_count": 5,
+  "results": []
+}
+```
+
+知识库缺少资料或任务要求最新信息时，可由 LLM 自主选择 `search_web`。检索异常沿用现有 Tool 错误路径记录为 `tool_error`，Agent 可以在下一轮恢复。Retriever 在 Top-K 后应用 cosine distance 上限；全部候选被过滤时，Tool 成功返回 `status=no_relevant_knowledge`、明确原因和空 `results`，不会写入 Evidence，也不会由 Runtime 强制调用 Web Search。通过阈值的每个 Chunk 才会转成当前任务的 `RetrievedEvidence`，按 `chunk_id` 去重后持久化到 State，并获得 `E1`、`E2`……内部 ID。
 
 ### 4.4 `replan`
 

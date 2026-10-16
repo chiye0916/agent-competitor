@@ -77,6 +77,7 @@ class Source:
 - `content`：`read_web` 获取的网页正文；
 - `retrieved_at`：搜索创建或正文更新的 UTC 时间；
 - `via`：默认 `search_web`，读取正文后更新为 `read_web`。
+- `http_status`：`read_web` 成功响应的 HTTP 状态码；旧 State 缺少该字段时恢复为 `None`。
 
 搜索结果按 URL Upsert：已存在的 URL 只更新摘要，不新增 Source。读取结果同样按精确 URL 更新已有 Source；如果 URL 尚不存在则新增 Source。
 

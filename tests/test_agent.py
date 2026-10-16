@@ -38,9 +38,10 @@ class FakeHeaders:
 
 
 class FakeResponse:
-    def __init__(self, body, content_type="application/json"):
+    def __init__(self, body, content_type="application/json", status=200):
         self.body = body
         self.headers = FakeHeaders(content_type)
+        self.status = status
 
     def __enter__(self):
         return self
@@ -451,12 +452,25 @@ class AgentTests(unittest.TestCase):
         self.assertIsNotNone(raised.exception.position)
 
     def test_old_state_without_guard_fields_still_loads(self):
-        old = {"task": "old", "plan": [], "sources": [], "recent_events": []}
+        old = {
+            "task": "old",
+            "plan": [],
+            "sources": [
+                {
+                    "id": "S1",
+                    "title": "Legacy source",
+                    "url": "https://example.com/legacy",
+                    "via": "read_web",
+                }
+            ],
+            "recent_events": [],
+        }
         loaded = AgentState.from_dict(old)
         self.assertEqual(loaded.action_history, [])
         self.assertEqual(loaded.read_attempts, {})
         self.assertEqual(loaded.knowledge_mode, "existing")
         self.assertEqual(loaded.retrieved_evidence, [])
+        self.assertIsNone(loaded.sources[0].http_status)
 
     @patch("urllib.request.urlopen")
     def test_search_api_response_is_normalized(self, urlopen):
@@ -474,6 +488,7 @@ class AgentTests(unittest.TestCase):
         urlopen.return_value = FakeResponse(body, "text/html")
         result = ResearchTools(Config()).read_web("https://example.com")
         self.assertEqual(result["title"], "Product")
+        self.assertEqual(result["http_status"], 200)
         self.assertIn("Visible fact", result["content"])
         self.assertNotIn("hidden()", result["content"])
         validate.assert_called_once()

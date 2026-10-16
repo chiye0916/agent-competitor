@@ -53,6 +53,25 @@ class FakeEmbeddingsAPI:
 
 
 class KnowledgeLayerTests(unittest.TestCase):
+    def test_config_reads_or_disables_provisional_relevance_threshold(self):
+        dotenv = SimpleNamespace(load_dotenv=lambda: None)
+
+        with patch.dict(
+            os.environ,
+            {"RAG_RELEVANCE_THRESHOLD": "0.42"},
+            clear=True,
+        ), patch.dict(sys.modules, {"dotenv": dotenv}):
+            configured = Config.from_env()
+        with patch.dict(
+            os.environ,
+            {"RAG_RELEVANCE_THRESHOLD": "none"},
+            clear=True,
+        ), patch.dict(sys.modules, {"dotenv": dotenv}):
+            disabled = Config.from_env()
+
+        self.assertEqual(configured.rag_relevance_threshold, 0.42)
+        self.assertIsNone(disabled.rag_relevance_threshold)
+
     def test_config_reads_independent_embedding_provider(self):
         environment = {
             "LLM_API_KEY": "llm-key",
@@ -125,6 +144,7 @@ class KnowledgeLayerTests(unittest.TestCase):
             snippet="pricing summary",
             content="full pricing content",
             via="read_web",
+            http_status=200,
         )
 
         document = Document.from_source(source)
@@ -133,6 +153,7 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertEqual(restored.id, source.id)
         self.assertEqual(restored.content, source.content)
         self.assertEqual(restored.metadata["via"], "read_web")
+        self.assertEqual(restored.metadata["http_status"], 200)
 
     def test_splitter_creates_overlapping_chunks_with_source_metadata(self):
         document = Document(

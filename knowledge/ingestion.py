@@ -118,7 +118,8 @@ class KnowledgeIngestionPipeline:
         self._write_status(status_path, summary)
 
         for source in values:
-            evaluation = self.evaluator.evaluate(source)
+            document = Document.from_source(source)
+            evaluation = self.evaluator.evaluate_document(document)
             evaluation_record = evaluation.to_dict()
             summary["evaluations"].append(evaluation_record)
             if not evaluation.accepted:
@@ -128,7 +129,7 @@ class KnowledgeIngestionPipeline:
                 continue
             summary["accepted"] += 1
             try:
-                result = self._ingest_source(source)
+                result = self._ingest_source(source, document)
                 summary[result["outcome"]] += 1
                 summary["chunks_written"] += result["chunks_written"]
                 evaluation_record.update(result)
@@ -155,7 +156,7 @@ class KnowledgeIngestionPipeline:
         self._write_status(status_path, summary)
         return summary
 
-    def _ingest_source(self, source: Source) -> dict[str, Any]:
+    def _ingest_source(self, source: Source, document: Document) -> dict[str, Any]:
         normalized_url = normalize_url(source.url)
         normalized_text = normalize_content(source.content)
         document_id = stable_document_id(normalized_url)
@@ -172,7 +173,6 @@ class KnowledgeIngestionPipeline:
             }
 
         ingested_at = utc_now()
-        document = Document.from_source(source)
         document.id = document_id
         document.url = normalized_url
         document.content = normalized_text

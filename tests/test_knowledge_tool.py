@@ -7,6 +7,7 @@ from agent.core import CompetitorAgent
 from agent.state import AgentState, Source
 from config.settings import Config
 from knowledge.chunk import Chunk
+from retrieval.models import RetrievalDiagnostics, RetrievalMatch
 from tools.demo import DemoLLMBackend, DemoResearchTools
 from tools.registry import build_default_registry
 
@@ -33,10 +34,44 @@ class FakeRetriever:
             )
         ][:top_k]
 
+    def diagnose(self, text: str, top_k: int = 5) -> RetrievalDiagnostics:
+        chunks = self.query(text, top_k=top_k)
+        matches = tuple(
+            RetrievalMatch(rank=index, chunk=chunk, distance=0.2)
+            for index, chunk in enumerate(chunks, 1)
+        )
+        return RetrievalDiagnostics(
+            query=text,
+            distance_metric="cosine",
+            threshold=0.5,
+            raw_matches=matches,
+            accepted_matches=matches,
+            rejected_matches=(),
+        )
+
 
 class FailingRetriever:
-    def query(self, text: str, top_k: int = 5) -> list[Chunk]:
+    def diagnose(self, text: str, top_k: int = 5) -> RetrievalDiagnostics:
         raise RuntimeError("知识库暂时不可用")
+
+
+class NoRelevantRetriever:
+    def diagnose(self, text: str, top_k: int = 5) -> RetrievalDiagnostics:
+        chunk = Chunk(
+            id="doc-unrelated:chunk:0",
+            document_id="doc-unrelated",
+            text="unrelated product overview",
+            metadata={"source_url": "https://example.com/unrelated"},
+        )
+        match = RetrievalMatch(rank=1, chunk=chunk, distance=0.72)
+        return RetrievalDiagnostics(
+            query=text,
+            distance_metric="cosine",
+            threshold=0.5,
+            raw_matches=(match,),
+            accepted_matches=(),
+            rejected_matches=(match,),
+        )
 
 
 class RetrieveThenFinishLLM(DemoLLMBackend):
@@ -94,6 +129,9 @@ class KnowledgeToolTests(unittest.TestCase):
         self.assertTrue(observation["success"])
         self.assertEqual(observation["tool"], "retrieve_knowledge")
         self.assertEqual(observation["result_count"], 1)
+        self.assertEqual(observation["status"], "relevant_knowledge_found")
+        self.assertEqual(observation["distance_metric"], "cosine")
+        self.assertEqual(observation["results"][0]["distance"], 0.2)
         self.assertEqual(observation["results"][0]["evidence_id"], "E1")
         self.assertEqual(observation["results"][0]["document_id"], "doc-pricing")
         self.assertEqual(
@@ -102,6 +140,72 @@ class KnowledgeToolTests(unittest.TestCase):
         )
         self.assertEqual(state.retrieved_evidence[0].chunk_id, "doc-pricing:chunk:0")
         self.assertEqual(retriever.calls, [("AI model pricing", 5)])
+
+    def test_no_relevant_knowledge_is_explicit_and_adds_no_evidence(self):
+        state = AgentState(task="unknown future fact")
+        registry = build_default_registry(
+            DemoResearchTools(Config()),
+            state,
+            NoRelevantRetriever(),
+        )
+
+        ends_run, observation = registry.execute(
+            "retrieve_knowledge",
+            {"query": "2035 Mars revenue"},
+        )
+
+        self.assertFalse(ends_run)
+        self.assertTrue(observation["success"])
+        self.assertEqual(observation["status"], "no_relevant_knowledge")
+        self.assertEqual(
+            observation["reason"],
+            "all_candidates_exceed_relevance_threshold",
+        )
+        self.assertEqual(observation["raw_candidate_count"], 1)
+        self.assertEqual(observation["result_count"], 0)
+        self.assertEqual(observation["rejected_count"], 1)
+        self.assertEqual(observation["results"], [])
+        self.assertEqual(state.retrieved_evidence, [])
+
+    def test_no_relevant_knowledge_does_not_force_web_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState(
+                task="unknown future fact",
+                sources=[
+                    Source(
+                        "S1",
+                        "Existing source",
+                        "https://example.com/source",
+                        content="existing evidence",
+                    )
+                ],
+            )
+            registry = build_default_registry(
+                DemoResearchTools(Config()),
+                state,
+                NoRelevantRetriever(),
+            )
+            agent = CompetitorAgent(
+                RetrieveThenFinishLLM(),
+                registry,
+                Config(max_rounds=2),
+                Path(tmp),
+                state,
+                echo_logs=False,
+            )
+
+            agent.run()
+
+            records = [
+                json.loads(line)
+                for line in (Path(tmp) / "run.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            results = [record for record in records if record["event"] == "tool_result"]
+            self.assertEqual([record["tool"] for record in results], ["retrieve_knowledge", "finish"])
+            self.assertEqual(
+                results[0]["observation"]["status"],
+                "no_relevant_knowledge",
+            )
 
     def test_agent_executes_retrieve_knowledge_without_core_changes(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -20,7 +20,7 @@ knowledge/
 ├── chunk.py          # 向量索引片段
 ├── splitter.py       # 重叠字符窗口切分
 ├── policy.py         # 可配置的确定性入库规则
-├── evaluator.py      # 可解释的 Source 接受/拒绝结果
+├── evaluator.py      # 切分前的 Document HTTP/错误页/文本质量门
 ├── ingestion.py      # 去重、版本判断、切分、Embedding、分阶段写入
 └── service.py        # 报告完成后的隔离边界与日志
 
@@ -30,6 +30,7 @@ embedding/
 
 retrieval/
 ├── chroma_store.py   # Chroma、版本清单、可见性切换与查询过滤
+├── models.py         # 原始匹配与阈值诊断结果
 └── retriever.py      # Tool 面向的查询服务
 
 tools/
@@ -39,7 +40,7 @@ agent/
 └── evidence.py       # 当前任务 Evidence 与程序化 Citation
 ```
 
-`KnowledgeEvaluator` 不调用 LLM、Embedding 或 Chroma，也不修改 AgentState。`KnowledgeIngestionPipeline` 复用 `Document.from_source()`、TextSplitter、EmbeddingModel 和 ChromaStore，不复制已有能力。
+`KnowledgeEvaluator` 不调用 LLM、Embedding 或 Chroma，也不修改 AgentState。Pipeline 先执行 `Document.from_source()`，再调用质量门；被拒绝的 Document 不会进入 TextSplitter、Embedding 或 Chroma。
 
 ## 3. 知识读取链
 
@@ -49,14 +50,15 @@ LLM decide
 ToolRegistry
     → KnowledgeRetrievalTool
 Retriever
-    → ChromaStore.query
+    → ChromaStore Top-K raw candidates
     → 只保留当前完整版本
-Chunk Observation
+    → cosine distance <= RAG_RELEVANCE_THRESHOLD
+Relevant Chunk / no_relevant_knowledge Observation
     → RetrievedEvidence（state.json）
     → Agent 下一轮决策 / ReportContextBuilder
 ```
 
-`retrieve_knowledge` 用于已有资料，`search_web` 用于知识库缺失或需要最新信息的场景。Prompt 只说明边界，不强制任一工具。检索结果不会转成 Source，也不会触发自动检索；Tool 会把实际返回的每个 Chunk 转为 `RetrievedEvidence`，按 `chunk_id` 去重、分配 `E#`，保存到 AgentState，之后由 ContextBuilder 正常读取。
+`retrieve_knowledge` 用于已有资料，`search_web` 用于知识库缺失或需要最新信息的场景。Prompt 只说明边界，不强制任一工具。通过阈值的 Chunk 会转为 `RetrievedEvidence`；若全部候选超过上限，Observation 明确返回 `status=no_relevant_knowledge`、空 `results`、阈值与过滤数量。Runtime 不因此自动搜索，下一步仍由 LLM 根据 `knowledge_mode`、任务和 Observation 自主决定。
 
 ### 3.1 Evidence 来源链
 
@@ -100,15 +102,18 @@ Agent finish
 
 ## 5. 入库规则
 
-第一版使用确定性规则，不使用 LLM 质量评审。Source 只有同时满足以下条件才会被接受：
+第一版使用确定性规则，不使用 LLM 质量评审。`read_web` Source 先转换成 Document，Document 只有同时满足以下条件才会被接受：
 
 - URL 是不带用户凭据的有效 HTTP/HTTPS URL；
 - `via == "read_web"`，证明正文来自网页读取而不是搜索摘要；
+- HTTP status 缺失（兼容旧 State）或位于 200～299；明确404记录为 `http_404`，其他非2xx记录为 `http_error`；
 - `content` 非空，不包含 NUL 等明显非文本内容；
+- 标题与正文共同显示404/Not Found，或正文同时包含404、找不到页面和返回首页等强错误页信号时，记录为 `not_found_page`；
+- 明显通用错误标题与错误正文组合记录为 `invalid_page`；
 - 规范化正文达到 `KNOWLEDGE_MIN_CONTENT_CHARS`；
 - 正文包含足够的字母、数字或中文等有效字符。
 
-只有 snippet、正文为空、过短、明显非文本或 URL 无效的 Source 会被拒绝。标题中是否出现 `official`、`docs`、`pricing` 不参与准入判断；当前规则不会把第三方资料一律排除，也不会把向量相似度视为可信度。
+规则不会使用简单的 `"404" in content`：正常的HTTP 404教程不会因此被拒绝。只有 snippet、HTTP错误、明显错误页、正文为空、过短、明显非文本或 URL 无效的 Document 会被拒绝。标题中是否出现 `official`、`docs`、`pricing` 不参与准入判断；当前规则不会把第三方资料一律排除，也不会把向量相似度视为可信度。
 
 每个评估结果都记录：
 
@@ -198,7 +203,10 @@ KNOWLEDGE_AUTO_INGEST=true
 KNOWLEDGE_MIN_CONTENT_CHARS=200
 KNOWLEDGE_CHUNK_SIZE=500
 KNOWLEDGE_CHUNK_OVERLAP=50
+RAG_RELEVANCE_THRESHOLD=0.50
 ```
+
+当前 Collection 使用 cosine distance，数值越小越相似；0.50 表示保留 `distance <= 0.50` 的候选，不代表“50%相关”。`none`、`off` 或 `disabled` 可关闭阈值并保留旧的全部 Top-K 行为。0.50 是根据现有少量人工 Query 选择的临时候选，不是最终校准值。
 
 `OpenAIEmbedding` 使用独立的 `EMBEDDING_API_KEY` 和 `EMBEDDING_BASE_URL`，因此对话可继续使用 DeepSeek 等不提供 Embedding 的服务。为了兼容原有单提供商配置，这两项留空时分别回退到 `LLM_API_KEY` 和 `LLM_BASE_URL`。`EMBEDDING_MODEL` 必须是 Embedding 提供商实际支持的模型。
 
@@ -264,7 +272,7 @@ python scripts\test_retrieval.py --query "2Cshop 支持多少种语言？" --top
 python scripts\test_retrieval.py --queries-file tests\data\rag_queries.json --top-k 5 --delay-seconds 21
 ```
 
-诊断查询返回 `RetrievalMatch`，其中保留 Chroma 的原始 cosine distance；原有 `Retriever.query()` 和 `retrieve_knowledge` Tool 仍返回/消费 `Chunk`，行为不变。脚本以只读意图打开已存在的 Collection，不调用写入方法，并对比执行前后的 Collection 数量和版本清单摘要。
+诊断查询返回 `RetrievalDiagnostics`，同时保留原始候选、接受项、拒绝项、cosine distance 和当前阈值。`Retriever.query()` 只返回通过阈值的 Chunk，Tool 会进一步提供显式状态。脚本以只读意图打开已存在的 Collection，不调用写入方法，并对比执行前后的 Collection 数量和版本清单摘要。
 
 当前 15 条真实 Query 的人工结果、失败案例和参数实验建议记录在 `docs/rag-evaluation.md`。本轮 Source Hit@1/3/5 分别为 69.2% / 92.3% / 92.3%；两条知识库无答案的 Query 都仍返回 5 条候选。该结果用于暴露排序、来源冲突、答案充分性和无答案拒绝边界问题，不代表已经实现自动 RAG Evaluation。
 
@@ -272,6 +280,8 @@ python scripts\test_retrieval.py --queries-file tests\data\rag_queries.json --to
 
 - 没有知识过期检测、定时刷新或自动重新抓取；`retrieved_at` 只帮助调用方判断新旧。
 - 没有来源冲突消解、事实真实性验证或可信度评分。
+- 0.50 阈值仍是临时候选：真实Q13中正确官方页面distance为0.535300，已被过滤，而更靠前的第三方旧资料0.486884仍通过；阈值不能解决来源权威性和排序问题。
+- 新质量门阻止后续错误页入库，但不会自动删除或停用修复前已写入当前 Collection 的历史404文档；清理现有向量需要单独审查的数据维护流程。
 - 向量召回质量依赖 Embedding、Chunk 参数和查询表达；当前只有 15 条 Query 的人工验证集和只读诊断脚本，没有自动评分器或 reranker。
 - 为保证 staged/旧版本不会挤占 `top_k`，当前查询会读取 Collection 的全部候选后再按版本清单过滤；数据量大时需要改进索引布局。
 - 版本清单使用原子文件替换，但没有跨进程写锁，也不是 Chroma 的数据库事务。

@@ -36,11 +36,18 @@ class Document:
             id=source.id,
             title=source.title,
             url=source.url,
-            content=source.content or source.snippet,
+            # A read_web Source must never fall back to a search snippet when
+            # its fetched body is empty; the quality gate needs the real body.
+            content=(
+                source.content
+                if source.via == "read_web"
+                else source.content or source.snippet
+            ),
             metadata={
                 "source_id": source.id,
                 "snippet": source.snippet,
                 "retrieved_at": source.retrieved_at,
                 "via": source.via,
+                "http_status": source.http_status,
             },
         )

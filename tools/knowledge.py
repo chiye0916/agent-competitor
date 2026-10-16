@@ -28,9 +28,10 @@ class KnowledgeRetrievalTool(BaseTool):
     def execute(self, **kwargs: Any) -> dict[str, Any]:
         query = kwargs["query"]
         top_k = kwargs.get("top_k", 5)
-        chunks = self.retriever.query(query, top_k=top_k)
+        diagnostics = self.retriever.diagnose(query, top_k=top_k)
         results = []
-        for chunk in chunks:
+        for match in diagnostics.accepted_matches:
+            chunk = match.chunk
             evidence = self.state.add_retrieved_evidence(
                 RetrievedEvidence.from_chunk(chunk)
             )
@@ -47,12 +48,19 @@ class KnowledgeRetrievalTool(BaseTool):
                     "retrieved_at": evidence.retrieved_at,
                     "ingested_at": evidence.ingested_at,
                     "metadata": evidence.metadata,
+                    "distance": match.distance,
                 }
             )
         return {
             "success": True,
             "tool": self.name,
+            "status": diagnostics.status,
             "query": query,
-            "result_count": len(chunks),
+            "reason": diagnostics.reason,
+            "distance_metric": diagnostics.distance_metric,
+            "relevance_threshold": diagnostics.threshold,
+            "raw_candidate_count": len(diagnostics.raw_matches),
+            "result_count": len(diagnostics.accepted_matches),
+            "rejected_count": len(diagnostics.rejected_matches),
             "results": results,
         }

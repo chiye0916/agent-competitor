@@ -69,7 +69,10 @@ def build_knowledge_services(
         collection_name=config.knowledge_collection,
         persist_directory=config.knowledge_db_path,
     )
-    retriever = Retriever(knowledge_store)
+    retriever = Retriever(
+        knowledge_store,
+        relevance_threshold=config.rag_relevance_threshold,
+    )
     pipeline = KnowledgeIngestionPipeline(
         evaluator=KnowledgeEvaluator(
             KnowledgePolicy(min_content_chars=config.knowledge_min_content_chars)

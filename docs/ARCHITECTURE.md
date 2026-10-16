@@ -25,7 +25,7 @@ flowchart TD
     TR -->|finish| FN[FinishTool]
     SW --> O[Observation]
     RW --> O
-    KT --> RET[Retriever]
+    KT --> RET[Retriever<br/>Top-K 后 distance threshold]
     RET --> VS[(ChromaStore)]
     VS --> KT
     KT --> E[RetrievedEvidence<br/>state.json]
@@ -41,9 +41,9 @@ flowchart TD
     WR --> CR[ReportCitationRenderer<br/>校验 ID + 程序生成来源]
     CR --> R[report.md + 可追溯引用]
     R --> KIS[KnowledgeIngestionService<br/>仅真实成功运行]
-    KIS --> KE[KnowledgeEvaluator]
-    KE --> DOC[Document]
-    DOC --> CH[Versioned Chunk]
+    KIS --> DOC[Document<br/>含 HTTP status metadata]
+    DOC --> KE[KnowledgeEvaluator<br/>HTTP / 错误页 / 文本质量门]
+    KE -->|accepted| CH[Versioned Chunk]
     CH --> EM[EmbeddingModel]
     EM --> VS
     VS --> VM[原子版本清单<br/>切换可见版本]
@@ -140,14 +140,14 @@ competitor-agent/
 | `knowledge/chunk.py` | `Chunk` | 表示携带文档 ID 和元数据的可序列化文本片段 |
 | `knowledge/splitter.py` | `TextSplitter` | 使用可配置字符窗口和重叠量把 Document 切分为 Chunk |
 | `knowledge/policy.py` | `KnowledgePolicy` | 保存最小正文长度等确定性准入阈值 |
-| `knowledge/evaluator.py` | `KnowledgeEvaluator`、`EvaluationResult` | 评估 Source，返回可解释的接受、拒绝原因和质量标记，不访问 Chroma |
+| `knowledge/evaluator.py` | `KnowledgeEvaluator`、`EvaluationResult` | 在切分前评估 Document 的 HTTP 状态、错误页特征和文本质量，返回可解释结果，不访问 Chroma |
 | `knowledge/ingestion.py` | `KnowledgeIngestionPipeline` | 规范化 URL/正文、识别版本、切分、Embedding、stage、版本切换并汇总结果 |
 | `knowledge/service.py` | `KnowledgeIngestionService` | 隔离报告完成边界和入库失败，写入完成或错误日志 |
 | `embedding/base.py` | `EmbeddingModel` | 定义单文本和批量文本向量化的提供商无关接口 |
 | `embedding/openai_embedding.py` | `OpenAIEmbedding` | 使用独立 Embedding API 配置（可回退到 LLM 配置），通过 OpenAI SDK 批量生成向量 |
 | `retrieval/chroma_store.py` | `ChromaStore` | 管理 Chroma、分阶段版本写入、原子版本清单、旧版本过滤与相似度查询；诊断接口可保留原始 distance |
-| `retrieval/models.py` | `RetrievalMatch` | 表示人工诊断所需的排名、Chunk 和 Chroma 原始 distance |
-| `retrieval/retriever.py` | `Retriever` | 为 Tool 提供稳定查询边界，隔离 Chroma 和 Embedding 细节；额外提供不改变原查询契约的诊断查询 |
+| `retrieval/models.py` | `RetrievalMatch`、`RetrievalDiagnostics` | 表示原始排名、Chunk、distance 及阈值接受/拒绝诊断 |
+| `retrieval/retriever.py` | `Retriever` | 在 Chroma Top-K 后按可配置 distance 上限过滤，并为 Tool/只读脚本提供诊断结果 |
 | `scripts/test_retrieval.py` | 只读 CLI | 对现有 Collection 执行单条或测试集检索，展示来源链和 distance，并核对逻辑快照未改变 |
 | 各目录 `__init__.py` | 包导出 | 声明 Python 包并导出主要公共类型 |
 
@@ -260,7 +260,7 @@ stateDiagram-v2
 
 1. 解析 URL 并限制为 HTTP(S)；
 2. DNS 解析主机，拒绝非公网 IP；
-3. 使用 `urllib.request` 请求最多 2 MB；
+3. 使用 `urllib.request` 请求最多 2 MB，并保存成功响应的 HTTP status；
 4. 对 HTML 使用 `VisibleTextParser` 提取文本；
 5. 规范空白并截断到 50,000 字符。
 
@@ -333,6 +333,7 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 | `KNOWLEDGE_MIN_CONTENT_CHARS` | `200`，已读取正文的最低有效字符数 |
 | `KNOWLEDGE_CHUNK_SIZE` | `500` |
 | `KNOWLEDGE_CHUNK_OVERLAP` | `50` |
+| `RAG_RELEVANCE_THRESHOLD` | `0.50`，cosine distance 上限临时候选；`none` 关闭 |
 | `TAVILY_API_KEY` | 真实搜索必需 |
 | `MAX_ROUNDS` | `12` |
 | `CONTEXT_CHAR_BUDGET` | `14000` |
@@ -349,6 +350,6 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 - JSONL 没有代码版本和单次 CLI invocation ID，且 `progress_assessment` 事件本身不含轮次字段；
 - 没有服务端 API、Web UI、鉴权或多租户隔离；
 - 没有异步 Worker 或分布式执行；
-- 没有自动 Context RAG、自动知识刷新、Claim-Level Citation、事实可信度判断、自动化 RAG Evaluation、长期 Memory 或 Multi-Agent；当前只有独立只读脚本和人工标注的 15 条 Query 基线，自动入库只发生在真实报告成功之后。
+- 没有自动 Context RAG、自动知识刷新、Claim-Level Citation、事实可信度判断、自动化 RAG Evaluation、长期 Memory 或 Multi-Agent；当前阈值0.50只是人工基线导出的临时候选，自动入库只发生在真实报告成功之后。
 
 上述均可作为未来扩展方向，但不属于当前架构。

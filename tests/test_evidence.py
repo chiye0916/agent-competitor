@@ -10,6 +10,7 @@ from agent.state import AgentState, infer_knowledge_mode
 from config.settings import Config
 from knowledge.chunk import Chunk
 from main import parse_args
+from retrieval.models import RetrievalDiagnostics, RetrievalMatch
 from tools.demo import DemoResearchTools
 from tools.registry import build_default_registry
 
@@ -49,6 +50,21 @@ class EvidenceRetriever:
             ),
         ]
         return values[:top_k]
+
+    def diagnose(self, text: str, top_k: int = 5) -> RetrievalDiagnostics:
+        chunks = self.query(text, top_k=top_k)
+        matches = tuple(
+            RetrievalMatch(rank=index, chunk=chunk, distance=0.2 + index / 100)
+            for index, chunk in enumerate(chunks, 1)
+        )
+        return RetrievalDiagnostics(
+            query=text,
+            distance_metric="cosine",
+            threshold=0.5,
+            raw_matches=matches,
+            accepted_matches=matches,
+            rejected_matches=(),
+        )
 
 
 class EvidenceReportLLM:

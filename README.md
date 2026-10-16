@@ -37,6 +37,7 @@ Copy-Item .env.example .env
 - `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`：可配置与对话模型不同的 OpenAI 兼容 Embedding 服务，Key 和 Base URL 留空时回退到 LLM 配置；
 - `KNOWLEDGE_DB_PATH` 和 `KNOWLEDGE_COLLECTION`；
 - `KNOWLEDGE_AUTO_INGEST=true`：真实报告成功后自动增量入库。
+- `RAG_RELEVANCE_THRESHOLD=0.50`：当前 cosine distance 上限候选值；`none` 可关闭。0.50 是实验性值，不是已经确定的最优阈值。
 
 `.env` 和 `.knowledge/` 已被 Git 忽略，不要提交真实 Key 或本地向量库。
 
@@ -83,11 +84,11 @@ python main.py --ingest-existing artifacts\<run>\state.json
 
 ## Tool 与 Knowledge 流程
 
-真实 Registry 注册 `search_web`、`read_web`、`retrieve_knowledge`、`replan` 和 `finish`。LLM 每轮自主选择一个 Tool；`retrieve_knowledge` 不会自动执行，也没有自动 Context RAG。它实际返回的 Chunk 会作为当前任务的 `RetrievedEvidence` 持久化，保留 Document、Source URL、内容版本和时间元数据，并进入后续决策与报告 Context。
+真实 Registry 注册 `search_web`、`read_web`、`retrieve_knowledge`、`replan` 和 `finish`。LLM 每轮自主选择一个 Tool；`retrieve_knowledge` 不会自动执行，也没有自动 Context RAG。Chroma 先返回 Top-K，再由 Retriever 按 cosine distance 上限过滤；通过的 Chunk 才会作为当前任务的 `RetrievedEvidence` 持久化。全部候选被过滤时，Tool 返回 `status=no_relevant_knowledge`，但不会自动调用 Web Search，下一步仍由 LLM 自主决定。
 
 报告模型只使用 Context 中真实存在的 `[S#]`（网页 Source）或 `[E#]`（知识 Evidence）。Runtime 校验模型实际选择的 ID，按首次出现顺序转换为 `[1]`、`[2]`，再从系统数据追加参考来源；不存在的 ID 和模型自行输出的非证据 URL 不会进入最终引用。
 
-报告成功后，独立入库 Pipeline 会评估本次 `read_web` 正文。符合规则的 Source 使用规范化 URL 生成稳定 Document ID，使用正文 SHA256 识别内容版本，再切分、Embedding 并写入 Chroma。相同版本不会重复 Embedding；更新版本完整写入后才通过原子版本清单切换为可检索状态。入库失败不会使已经生成的报告或 `completed` AgentState 失效。
+报告成功后，独立入库 Pipeline 先把本次 `read_web` Source 转成 Document，再在切分前检查 HTTP 状态、空正文、明显的404/错误页和原有文本质量规则。只有通过质量门的 Document 才会计算 Hash、切分、Embedding 并写入 Chroma。相同版本不会重复 Embedding；更新版本完整写入后才通过原子版本清单切换为可检索状态。入库失败不会使已经生成的报告或 `completed` AgentState 失效。
 
 ## 测试
 
@@ -98,7 +99,7 @@ python scripts\test_retrieval.py --query "2Cshop 标准版首年费用是多少�
 python scripts\test_retrieval.py --queries-file tests\data\rag_queries.json --top-k 5 --delay-seconds 21
 ```
 
-输出包含原始 cosine distance、来源 URL、Chunk/Document ID、时间元数据和正文。脚本不会创建 Collection、写入 Chunk 或切换知识版本；`--delay-seconds` 用于适配 Embedding 服务限流，不影响检索排序。
+输出包含原始 cosine distance、阈值接受/拒绝决定、来源 URL、Chunk/Document ID、时间元数据和正文。脚本不会创建 Collection、写入 Chunk 或切换知识版本；`--delay-seconds` 用于适配 Embedding 服务限流，不影响检索排序。
 
 测试使用确定性 Embedding、临时 Chroma 和故障注入，不调用收费 API：
 
@@ -114,6 +115,7 @@ python main.py --demo
 
 - 网页读取器不执行 JavaScript，也不解析 PDF；
 - 知识库没有自动过期、定时刷新、来源冲突消解或事实真实性验证；
+- 0.50 只是根据当前少量 Query 设置的临时 cosine distance 上限；已知它会过滤部分正确但距离较大的证据，仍需扩大样本校准；
 - 向量召回质量依赖 Embedding、Chunk 参数和查询表达；
 - 当前引用是证据级而不是 Claim-Level Citation，也不验证证据是否足以支持某一句结论；
 - 当前只有 15 条 Query 的人工 RAG 基线，没有自动化 Recall@K、Precision@K、MRR、NDCG 或 LLM-as-a-Judge；

@@ -29,7 +29,8 @@ READ_WEB_INPUT_SCHEMA: dict[str, Any] = {
 
 RETRIEVE_KNOWLEDGE_DESCRIPTION = (
     "从已有知识库中检索与当前任务相关的历史资料；适合优先复用已有知识，"
-    "不能替代对最新信息的 Web 搜索。"
+    "不能替代对最新信息的 Web 搜索。若没有候选通过相关性阈值，工具会明确返回 "
+    "no_relevant_knowledge，由你自主决定下一步，不会自动触发 Web 搜索。"
 )
 RETRIEVE_KNOWLEDGE_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",

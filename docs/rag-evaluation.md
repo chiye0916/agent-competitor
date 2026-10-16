@@ -2,11 +2,11 @@
 
 ## 1. 验证范围
 
-本文记录第三阶段 Step 4.2 的人工检索基线。目标是观察当前 `Retriever → ChromaStore` 的真实召回表现，并据此提出后续实验方案；本次没有修改生产检索参数、Agent 决策逻辑或知识库内容，也没有引入 Reranker、自动评分器或完整 RAG Evaluation Framework。
+本文首先记录第三阶段 Step 4.2 的修复前人工检索基线，再在第10节记录第一轮问题修复后的对照结果。Step 4.2 基线本身没有修改生产检索参数、Agent 决策逻辑或知识库内容，也没有引入 Reranker、自动评分器或完整 RAG Evaluation Framework。
 
 验证日期为 2026-10-16。测试对象是本地 `.knowledge/chroma` 中已经入库的 2Cshop 资料：4 篇活跃 Document、35 个 Chunk。测试使用实际配置的 Voyage AI `voyage-4` 生成 Query Embedding，因此结果是当前知识库与当前 Embedding 配置的真实快照，不应外推为其他语料库的固定结论。
 
-## 2. 当前配置
+## 2. Step 4.2 基线配置（修复前）
 
 | 项目 | 当前值 | 依据 |
 |---|---|---|
@@ -15,7 +15,7 @@
 | Chunk Overlap | 50 字符 | `KNOWLEDGE_CHUNK_OVERLAP` / `Config` |
 | 默认 Top-K | 5 | `Retriever.query()`、`retrieve_knowledge` Schema |
 | 距离度量 | cosine | Chroma Collection 的 `hnsw:space` |
-| Similarity Threshold | 无 | 查询结果未做距离阈值过滤 |
+| Similarity Threshold | 无 | 修复前查询结果未做距离阈值过滤 |
 | 业务 Metadata Filter | 无 | 未按产品、来源类型或时间筛选 |
 | 版本过滤 | 有 | 只返回版本清单中的活跃内容版本 |
 
@@ -174,3 +174,60 @@ python main.py --demo --output-dir $env:TEMP\competitor-agent-step42-demo
 ```
 
 结果为 48 个单元/集成测试全部通过，离线 Demo 在 6 轮内完成并生成报告。Demo 使用临时目录，未改动用户工作区中原有的 `artifacts/demo` 状态。
+
+## 10. 第一轮问题修复后的对照
+
+### 10.1 Knowledge Quality Gate
+
+新链路为：
+
+```text
+read_web Source（保存 HTTP status）
+    → Document.from_source
+    → KnowledgeEvaluator.evaluate_document
+    → accepted 才进入 Hash / Chunk / Embedding / Chroma
+```
+
+对历史 `artifacts/knowledge-task-a/state.json` 做只读复评：S1、S12仍为 `valid_full_text`；此前入库的S11被识别为 `not_found_page`。S11正文含“404错误，找不到您想要的页面”“返回首页”等组合信号，而正常的HTTP 404教程测试仍能通过。新门禁不会自动删除修复前已写入的历史向量。
+
+### 10.2 临时阈值0.50
+
+当前 Chroma 使用原始 cosine distance，越小越相似；候选条件为 `distance <= 0.50`。这是配置项 `RAG_RELEVANCE_THRESHOLD` 的临时候选值，可以用 `none` 关闭。
+
+2026-10-16 对同一真实 Collection 复测：
+
+| Query | Raw / Accepted / Rejected | 结果 |
+|---|---:|---|
+| Q01 标准版首年费用 | 5 / 5 / 0 | 官方价格页distance=0.340955，正常保留 |
+| Q13 三个精确价格 | 5 / 1 / 4 | 第三方旧文0.486884通过；正确官方页0.535300被拒绝 |
+| Q14 原生iOS应用（无答案） | 5 / 0 / 5 | 返回 `no_relevant_knowledge`，Top1 distance=0.522944 |
+
+因此0.50能够处理已测Q14，但有效与无答案distance存在重叠，且Q13证明它会误删正确证据。当前数据不足以确定最终阈值；0.50不能被解释成“50%相关”，也不能解决来源冲突、正确Chunk排名靠后或多Chunk组合问题。
+
+### 10.3 Tool无答案状态
+
+所有候选被拒绝时，`retrieve_knowledge` 成功执行但返回：
+
+```json
+{
+  "success": true,
+  "tool": "retrieve_knowledge",
+  "status": "no_relevant_knowledge",
+  "reason": "all_candidates_exceed_relevance_threshold",
+  "distance_metric": "cosine",
+  "relevance_threshold": 0.5,
+  "raw_candidate_count": 5,
+  "result_count": 0,
+  "rejected_count": 5,
+  "results": []
+}
+```
+
+该Observation由LLM正常读取，Runtime不会据此自动调用Web Search。
+
+### 10.4 回归结果
+
+- `python -m unittest discover -s tests -v`：63/63通过；
+- `python -m compileall .`：通过；
+- `python -m pip check`：`No broken requirements found`；
+- 离线Demo：6轮正常完成并生成报告，输出位于系统临时目录，未改动工作区的`artifacts/demo`。

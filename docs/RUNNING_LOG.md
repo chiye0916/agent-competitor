@@ -302,3 +302,11 @@ Step 4.2 使用现有 4 篇活跃 Document、35 个 Chunk、Voyage AI `voyage-4`
 典型失败包括：第三方旧价格在 Q02/Q13 中排在当前官方价格之前；Q03/Q04/Q09 虽然 Top 1 来源正确，但答案位于相邻 Chunk；Q11 对已入库的 404 页面未能在 Top 5 命中；无答案 Query 因没有阈值仍返回最近邻。完整逐项记录和参数实验建议见 `docs/rag-evaluation.md`。本轮未修改 Top-K、阈值、Chunk Size/Overlap、Embedding、distance metric 或 Metadata Filter，也未引入 Reranker。
 
 完整测试为 48/48 通过；离线 Demo 在临时目录中按原有六轮脚本完成并生成报告，没有触碰工作区现有 `artifacts/demo` 删除状态。
+
+## 8. 2026-10-16 Knowledge Quality Gate 与检索阈值首轮修复
+
+本轮只处理错误页入库和无答案强制最近邻。`read_web`开始保存HTTP status；Pipeline先构造Document，再在Chunk/Embedding前检查非2xx、空正文、明显404/Not Found页和通用错误页。对历史任务A的三个`read_web` Source只读复评，S1/S12通过，含“404错误、找不到页面、返回首页”的S11以`not_found_page`拒绝。现有Collection中的历史S11向量没有自动删除。
+
+Retriever保持Top-K=5、cosine metric、Chunk 500/50和`voyage-4`不变，在Top-K后应用可配置distance上限。当前临时候选为0.50，判断条件是`distance <= 0.50`。真实复测结果：Q01接受5/5；无答案Q14拒绝5/5并返回`no_relevant_knowledge`；边界Q13只接受第三方旧文0.486884，却拒绝正确官方页面0.535300。这证明0.50尚不是最终阈值，也再次确认单一阈值不能修复来源冲突和排序问题。
+
+新增测试覆盖HTTP 404、HTTP 200错误页、空正文、正常页面、正常404教程、相关/不相关/部分阈值、关闭阈值兼容、Tool显式无答案Observation及“不强制Web Search”。完整测试63/63通过，`compileall`通过，`pip check`报告`No broken requirements found`，离线Demo在系统临时目录中按原有6轮流程完成。

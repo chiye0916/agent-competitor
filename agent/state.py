@@ -52,6 +52,7 @@ class Source:
     content: str = ""
     retrieved_at: str = field(default_factory=utc_now)
     via: str = "search_web"
+    http_status: int | None = None
 
 
 @dataclass
