@@ -6,6 +6,8 @@
 
 - `artifacts/demo/run.jsonl` 与 `artifacts/demo/state.json`
 - `artifacts/20261012-101236/run.jsonl` 与 `artifacts/20261012-101236/state.json`
+- `artifacts/knowledge-task-a/run.jsonl`、`state.json` 与 `knowledge_ingestion.json`
+- `artifacts/knowledge-task-b-2/run.jsonl`、`state.json` 与 `knowledge_ingestion.json`
 
 日志时间使用 UTC。本文档中的“当前状态”是根据同一日志内上一轮 `state_change` 和最终 `state.json` 还原的摘要。
 
@@ -240,3 +242,53 @@ Expecting ',' delimiter: line 1 column 1070 (char 1069)
 - 本地真实运行的 `CONTEXT_CHAR_BUDGET` 从 80,000 恢复为默认 14,000，减少决策漂移和格式异常风险。
 
 自动化测试新增了非法 JSON 重试、重试耗尽诊断、Decision 跨轮恢复和不同 URL 累计重复触发 Replan 四类用例。
+
+## 6. 2026-10-15/16 Knowledge Layer 真实端到端验证
+
+本节使用 DeepSeek 对话模型、Voyage AI `voyage-4` Embedding 和本地 Chroma，验证“报告后入库 → 新任务 Tool 检索 → 新资料增量入库”。日志时间为 UTC。
+
+### 6.1 任务 A：首次知识入库
+
+`artifacts/knowledge-task-a/knowledge_ingestion.json` 的最终结果：
+
+| 字段 | 值 |
+|---|---:|
+| `status` | `completed` |
+| `total_sources` | 14 |
+| `accepted` / `rejected` | 3 / 11 |
+| `new` / `failed` | 3 / 0 |
+| `chunks_written` | 31 |
+
+被接受的 S1、S11 和 S12 都是 `read_web` 正文，分别写入 13、2 和 16 个 Chunk。11 个 `search_web` 摘要以 `missing_verified_full_text` 被拒绝，这是准入策略的预期结果。
+
+### 6.2 任务 B：跨任务检索与故障恢复
+
+`artifacts/knowledge-task-b-2/run.jsonl` 使用明确任务“优先查询已有知识，总结并分析 2Cshop 的价格方案与产品定位”。运行结果：
+
+- Round 1–3 连续调用 `retrieve_knowledge`，每次 `result_count=8`，证明任务 A 的 Chunk 可被新任务召回；
+- Round 4–6 继续调用检索，触发 Voyage 未绑定付款账户的 3 RPM 限制，三次记录为 429 `tool_error`；
+- Round 7 改用 `search_web`，Round 8 用 `read_web` 读取官方价格页，Round 9 `finish`；
+- AgentState 最终为 `completed`，生成 13,341 字节的 `report.md`，证明 Tool 限流没有使整个 Agent 失败。
+
+最终 `report_context_built` 只包含网页 Source：Primary 为 S3，Supplemental 为 S1、S2、S4、S5。虽然知识 Tool 已成功召回 Chunk，但检索结果不会转为 Source，因此未直接进入最终 `ReportContextBuilder`。
+
+### 6.3 限流后入库重试与幂等验证
+
+报告完成后的首次自动入库因同一 429 限流失败，但没有撤销报告或 `completed` AgentState。等待限流窗口后执行：
+
+```powershell
+python main.py --ingest-existing artifacts\knowledge-task-b-2\state.json
+```
+
+2026-10-15T12:20:59Z 的重试成功：`new=1`、`chunks_written=4`、`failed=0`。2026-10-16T01:21:17Z 再次执行同一命令，结果为 `new=0`、`unchanged=1`、`chunks_written=0`、`failed=0`，证明内容未变时不会重复 Embedding 或写入。
+
+当前 `.knowledge/chroma/competitor_knowledge.versions.json` 有 4 篇活跃文档，Chunk 数为 `13 + 2 + 16 + 4 = 35`。
+
+### 6.4 本次验证确认的 Step 4 输入
+
+- `retrieve_knowledge` 不在当前重复动作签名中，相同/相近查询在短时间内重复请求 Embedding；
+- Retriever 没有查询缓存、`Retry-After`/429 退避或提供商级限速；
+- 成功召回的 Chunk 只是 Tool Observation，不会进入 `state.sources` 和最终报告 Context；
+- 通用 Embedding 适配器没有传递 Voyage 建议的 `input_type=query/document`。
+
+这些是实测暴露的后续优化输入，本次只记录现状，没有修改 Agent Loop、Retriever 或 Report Context。

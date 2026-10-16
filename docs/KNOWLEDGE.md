@@ -174,6 +174,16 @@ KNOWLEDGE_CHUNK_OVERLAP=50
 
 `OpenAIEmbedding` 使用独立的 `EMBEDDING_API_KEY` 和 `EMBEDDING_BASE_URL`，因此对话可继续使用 DeepSeek 等不提供 Embedding 的服务。为了兼容原有单提供商配置，这两项留空时分别回退到 `LLM_API_KEY` 和 `LLM_BASE_URL`。`EMBEDDING_MODEL` 必须是 Embedding 提供商实际支持的模型。
 
+2026-10-15 已使用 Voyage AI `voyage-4` 完成真实入库和查询验证。当 Key 来自 Voyage AI Dashboard 时，配置为：
+
+```env
+EMBEDDING_API_KEY=<voyage-api-key>
+EMBEDDING_BASE_URL=https://api.voyageai.com/v1
+EMBEDDING_MODEL=voyage-4
+```
+
+`EMBEDDING_BASE_URL` 只填到 `/v1`，SDK 会自动请求 `/embeddings`。Voyage AI Key 不能与 MongoDB Atlas 的 `https://ai.mongodb.com/v1` 端点混用。未绑定付款方式的实测账户受到 3 RPM 限制；这是提供商限流，不是 Chroma 或 Tool Registry 故障。
+
 `.knowledge/` 被 Git 忽略。更换 Embedding 模型可能改变向量维度或语义空间；当前没有自动迁移机制，应为不兼容模型使用新的 Collection。
 
 ## 9. 重试与手动验证
@@ -184,15 +194,15 @@ KNOWLEDGE_CHUNK_OVERLAP=50
 python main.py --ingest-existing artifacts\<run>\state.json
 ```
 
-任务 A 入库、任务 B 复用的手动流程：
+任务 A 入库、任务 B 复用的手动流程（任务 B 必须写明产品名，不要使用“产品 A”占位符）：
 
 ```powershell
 $env:KNOWLEDGE_AUTO_INGEST = "true"
-python main.py --task "调研产品 A 的定位、价格和核心能力" --output-dir artifacts\knowledge-task-a
+python main.py --task "调研 2Cshop 的定位、价格和核心能力" --output-dir artifacts\knowledge-task-a
 Get-Content artifacts\knowledge-task-a\knowledge_ingestion.json
 
-python main.py --task "基于已有知识比较产品 A 的价格与定位，并在资料不足时搜索网页" --output-dir artifacts\knowledge-task-b
-Select-String -Path artifacts\knowledge-task-b\run.jsonl -Pattern 'retrieve_knowledge'
+python main.py --task "优先查询已有知识，总结并分析 2Cshop 的价格方案与产品定位；如果知识库资料不足，再搜索网页" --output-dir artifacts\knowledge-task-b-2 --max-rounds 20
+Select-String -Path artifacts\knowledge-task-b-2\run.jsonl -Pattern 'retrieve_knowledge'
 ```
 
 LLM 自主决定是否调用 `retrieve_knowledge`，因此第二条命令不保证固定调用。需要确定性验证时运行自动化测试：
@@ -203,6 +213,18 @@ python -m unittest discover -s tests -v
 python main.py --demo
 ```
 
+### 9.1 2026-10-15/16 真实验证结果
+
+`artifacts/knowledge-task-a` 首次入库完成：14 个 Source 中 3 个 `read_web` 正文被接受，11 个搜索摘要被拒绝，新增 3 篇文档和 31 个 Chunk，失败数为 0。
+
+`artifacts/knowledge-task-b-2` 证明了跨任务复用：前 3 轮 `retrieve_knowledge` 每次返回 8 个相关 Chunk。第 4–6 轮因 Voyage 账户的 3 RPM 限制返回 429，Agent 随后改用 `search_web` 和 `read_web`，在第 9 轮成功生成报告。报告后自动入库同样因 429 失败，等待限流窗口后执行：
+
+```powershell
+python main.py --ingest-existing artifacts\knowledge-task-b-2\state.json
+```
+
+手动重试新增 1 篇文档和 4 个 Chunk。在 2026-10-16 再次执行同一命令，结果为 `new=0`、`unchanged=1`、`chunks_written=0`、`failed=0`，真实验证了幂等去重。当前版本清单中共有 4 篇活跃文档、35 个 Chunk。
+
 ## 10. 已知限制
 
 - 没有知识过期检测、定时刷新或自动重新抓取；`retrieved_at` 只帮助调用方判断新旧。
@@ -210,5 +232,7 @@ python main.py --demo
 - 向量召回质量依赖 Embedding、Chunk 参数和查询表达，当前没有检索评测集或 reranker。
 - 为保证 staged/旧版本不会挤占 `top_k`，当前查询会读取 Collection 的全部候选后再按版本清单过滤；数据量大时需要改进索引布局。
 - 版本清单使用原子文件替换，但没有跨进程写锁，也不是 Chroma 的数据库事务。
-- 自动入库只处理本次 State 中通过 `read_web` 获得的正文，不自动导入 `retrieve_knowledge` Observation。
+- 自动入库只处理本次 State 中通过 `read_web` 获得的正文，不自动导入 `retrieve_knowledge` Observation。检索到的 Chunk 也不会转为 Source，因此当前不会进入只读取 `state.sources` 的 `ReportContextBuilder`。
+- `retrieve_knowledge` 尚未纳入重复动作保护，也没有查询缓存、429 退避或提供商级速率控制；相同/相近查询可能在短时间内重复请求 Embedding。
+- 当前通用 `OpenAIEmbedding` 调用未传递 Voyage 的 `input_type=query/document`，功能已验证可用，但还不是面向 Voyage 检索质量的原生适配。
 - 没有每轮 Context 自动检索、Long-term Memory、Multi-Agent 或 LLM 入库评审。
