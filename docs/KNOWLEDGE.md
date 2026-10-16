@@ -255,11 +255,24 @@ python main.py --ingest-existing artifacts\knowledge-task-b-2\state.json
 
 手动重试新增 1 篇文档和 4 个 Chunk。在 2026-10-16 再次执行同一命令，结果为 `new=0`、`unchanged=1`、`chunks_written=0`、`failed=0`，真实验证了幂等去重。当前版本清单中共有 4 篇活跃文档、35 个 Chunk。
 
+### 9.2 只读 RAG 人工验证
+
+Step 4.2 增加了 Agent 运行链之外的只读验证入口：
+
+```powershell
+python scripts\test_retrieval.py --query "2Cshop 支持多少种语言？" --top-k 5
+python scripts\test_retrieval.py --queries-file tests\data\rag_queries.json --top-k 5 --delay-seconds 21
+```
+
+诊断查询返回 `RetrievalMatch`，其中保留 Chroma 的原始 cosine distance；原有 `Retriever.query()` 和 `retrieve_knowledge` Tool 仍返回/消费 `Chunk`，行为不变。脚本以只读意图打开已存在的 Collection，不调用写入方法，并对比执行前后的 Collection 数量和版本清单摘要。
+
+当前 15 条真实 Query 的人工结果、失败案例和参数实验建议记录在 `docs/rag-evaluation.md`。本轮 Source Hit@1/3/5 分别为 69.2% / 92.3% / 92.3%；两条知识库无答案的 Query 都仍返回 5 条候选。该结果用于暴露排序、来源冲突、答案充分性和无答案拒绝边界问题，不代表已经实现自动 RAG Evaluation。
+
 ## 10. 已知限制
 
 - 没有知识过期检测、定时刷新或自动重新抓取；`retrieved_at` 只帮助调用方判断新旧。
 - 没有来源冲突消解、事实真实性验证或可信度评分。
-- 向量召回质量依赖 Embedding、Chunk 参数和查询表达，当前没有检索评测集或 reranker。
+- 向量召回质量依赖 Embedding、Chunk 参数和查询表达；当前只有 15 条 Query 的人工验证集和只读诊断脚本，没有自动评分器或 reranker。
 - 为保证 staged/旧版本不会挤占 `top_k`，当前查询会读取 Collection 的全部候选后再按版本清单过滤；数据量大时需要改进索引布局。
 - 版本清单使用原子文件替换，但没有跨进程写锁，也不是 Chroma 的数据库事务。
 - 自动入库只处理本次 State 中通过 `read_web` 获得的正文，不会把 `retrieve_knowledge` 返回的 Evidence 再次入库。Evidence 不转成 Source，但会单独进入 Decision/Report Context。

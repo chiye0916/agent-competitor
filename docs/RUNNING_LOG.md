@@ -292,3 +292,13 @@ python main.py --ingest-existing artifacts\knowledge-task-b-2\state.json
 - 通用 Embedding 适配器没有传递 Voyage 建议的 `input_type=query/document`。
 
 Step 4.1 还加入了程序化证据引用和用户主动的 `existing/latest` 模式，但没有修改 Agent Loop 或 Retriever 核心参数。重复查询、429 恢复、Voyage 原生 `input_type` 和召回质量仍属于后续 Step 4.2/4.3 输入。
+
+## 7. 2026-10-16 RAG 人工检索基线
+
+Step 4.2 使用现有 4 篇活跃 Document、35 个 Chunk、Voyage AI `voyage-4` 和 cosine distance，运行 `tests/data/rag_queries.json` 中的 15 条 Query。为适配账户限流，批量验证使用 21 秒间隔；验证脚本没有执行入库、Chunk 写入或版本切换。
+
+13 条有答案 Query 的人工结果：Source Hit@1 为 9/13（69.2%），Hit@3 和 Hit@5 都为 12/13（92.3%）；Answer Sufficiency@1/3/5 分别为 5/13（38.5%）、11/13（84.6%）、12/13（92.3%）。两条无答案 Query 都返回 5 条不足以回答问题的候选。
+
+典型失败包括：第三方旧价格在 Q02/Q13 中排在当前官方价格之前；Q03/Q04/Q09 虽然 Top 1 来源正确，但答案位于相邻 Chunk；Q11 对已入库的 404 页面未能在 Top 5 命中；无答案 Query 因没有阈值仍返回最近邻。完整逐项记录和参数实验建议见 `docs/rag-evaluation.md`。本轮未修改 Top-K、阈值、Chunk Size/Overlap、Embedding、distance metric 或 Metadata Filter，也未引入 Reranker。
+
+完整测试为 48/48 通过；离线 Demo 在临时目录中按原有六轮脚本完成并生成报告，没有触碰工作区现有 `artifacts/demo` 删除状态。

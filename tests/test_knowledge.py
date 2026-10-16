@@ -197,10 +197,17 @@ class KnowledgeLayerTests(unittest.TestCase):
         )
         store.add_chunks(chunks, vectors)
         results = store.query("AI model pricing", top_k=2)
+        detailed = store.query_with_distances("AI model pricing", top_k=2)
 
         self.assertEqual({chunk.document_id for chunk in results}, {"openai", "deepseek"})
         self.assertEqual({chunk.metadata["vendor"] for chunk in results}, {"OpenAI", "DeepSeek"})
         self.assertTrue(all(chunk.metadata["tags"] == ["ai", "pricing"] for chunk in results))
+        self.assertEqual(
+            [match.chunk.document_id for match in detailed],
+            [chunk.document_id for chunk in results],
+        )
+        self.assertTrue(all(match.distance is not None for match in detailed))
+        self.assertEqual([match.rank for match in detailed], [1, 2])
 
 
 if __name__ == "__main__":

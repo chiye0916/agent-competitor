@@ -108,7 +108,11 @@ competitor-agent/
 ├── retrieval/
 │   ├── __init__.py
 │   ├── chroma_store.py
+│   ├── models.py
 │   └── retriever.py
+├── scripts/
+│   ├── __init__.py
+│   └── test_retrieval.py
 └── storage/
     ├── __init__.py
     └── logger.py
@@ -141,11 +145,15 @@ competitor-agent/
 | `knowledge/service.py` | `KnowledgeIngestionService` | 隔离报告完成边界和入库失败，写入完成或错误日志 |
 | `embedding/base.py` | `EmbeddingModel` | 定义单文本和批量文本向量化的提供商无关接口 |
 | `embedding/openai_embedding.py` | `OpenAIEmbedding` | 使用独立 Embedding API 配置（可回退到 LLM 配置），通过 OpenAI SDK 批量生成向量 |
-| `retrieval/chroma_store.py` | `ChromaStore` | 管理 Chroma、分阶段版本写入、原子版本清单、旧版本过滤与相似度查询 |
-| `retrieval/retriever.py` | `Retriever` | 为 Tool 提供稳定查询边界，隔离 Chroma 和 Embedding 细节 |
+| `retrieval/chroma_store.py` | `ChromaStore` | 管理 Chroma、分阶段版本写入、原子版本清单、旧版本过滤与相似度查询；诊断接口可保留原始 distance |
+| `retrieval/models.py` | `RetrievalMatch` | 表示人工诊断所需的排名、Chunk 和 Chroma 原始 distance |
+| `retrieval/retriever.py` | `Retriever` | 为 Tool 提供稳定查询边界，隔离 Chroma 和 Embedding 细节；额外提供不改变原查询契约的诊断查询 |
+| `scripts/test_retrieval.py` | 只读 CLI | 对现有 Collection 执行单条或测试集检索，展示来源链和 distance，并核对逻辑快照未改变 |
 | 各目录 `__init__.py` | 包导出 | 声明 Python 包并导出主要公共类型 |
 
 当前不存在 Scheduler、Planner 服务、自动 Context RAG 服务或 Multi-Agent Coordinator。真实模式在 CLI 装配阶段让 Retriever 和 Ingestion Pipeline 共享同一 ChromaStore；Agent Core 仍只面向 Tool Registry，不包含入库分支。Demo 不装配知识服务，保持原有固定六轮行为且不污染真实知识库。
+
+RAG 人工验证脚本是 Agent 运行链之外的诊断入口。它以 `create_if_missing=False` 打开已有 Collection，只调用 `Retriever.query_with_distances()`；原有 Tool 继续调用 `Retriever.query()` 并接收 `Chunk`，因此 Agent Observation 和行为没有变化。
 
 ## 4. LLM 与 Agent Runtime 的职责区别
 
@@ -341,6 +349,6 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 - JSONL 没有代码版本和单次 CLI invocation ID，且 `progress_assessment` 事件本身不含轮次字段；
 - 没有服务端 API、Web UI、鉴权或多租户隔离；
 - 没有异步 Worker 或分布式执行；
-- 没有自动 Context RAG、自动知识刷新、Claim-Level Citation、事实可信度判断、自动化 RAG Evaluation、长期 Memory 或 Multi-Agent；当前自动入库只发生在真实报告成功之后。
+- 没有自动 Context RAG、自动知识刷新、Claim-Level Citation、事实可信度判断、自动化 RAG Evaluation、长期 Memory 或 Multi-Agent；当前只有独立只读脚本和人工标注的 15 条 Query 基线，自动入库只发生在真实报告成功之后。
 
 上述均可作为未来扩展方向，但不属于当前架构。

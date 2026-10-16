@@ -12,13 +12,14 @@ tools/                  BaseTool、Registry、研究与知识检索工具
 knowledge/              Document/Chunk、策略、评估和入库 Pipeline
 embedding/              Embedding 抽象与 OpenAI 实现
 retrieval/              ChromaStore、版本可见性和 Retriever
+scripts/                只读 RAG 人工检索验证脚本
 config/                 环境变量配置
 storage/                JSONL 日志
 tests/                  离线单元与集成测试
 docs/                   当前实现的详细交接文档
 ```
 
-详细架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，Knowledge Layer 见 [docs/KNOWLEDGE.md](docs/KNOWLEDGE.md)。
+详细架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，Knowledge Layer 见 [docs/KNOWLEDGE.md](docs/KNOWLEDGE.md)，当前 RAG 人工基线见 [docs/rag-evaluation.md](docs/rag-evaluation.md)。
 
 ## 安装与配置
 
@@ -90,6 +91,15 @@ python main.py --ingest-existing artifacts\<run>\state.json
 
 ## 测试
 
+对现有真实知识库执行只读人工检索验证：
+
+```powershell
+python scripts\test_retrieval.py --query "2Cshop 标准版首年费用是多少？" --top-k 5
+python scripts\test_retrieval.py --queries-file tests\data\rag_queries.json --top-k 5 --delay-seconds 21
+```
+
+输出包含原始 cosine distance、来源 URL、Chunk/Document ID、时间元数据和正文。脚本不会创建 Collection、写入 Chunk 或切换知识版本；`--delay-seconds` 用于适配 Embedding 服务限流，不影响检索排序。
+
 测试使用确定性 Embedding、临时 Chroma 和故障注入，不调用收费 API：
 
 ```powershell
@@ -98,7 +108,7 @@ python -m unittest discover -s tests -v
 python main.py --demo
 ```
 
-覆盖 Agent Loop、Tool Registry、RAG Tool、Evidence 持久化与追踪、程序化引用、知识模式、入库过滤、幂等、内容更新、Embedding 失败、Chroma 部分写入恢复、跨任务检索和报告失败隔离。
+覆盖 Agent Loop、Tool Registry、RAG Tool、Evidence 持久化与追踪、程序化引用、知识模式、入库过滤、幂等、内容更新、Embedding 失败、Chroma 部分写入恢复、跨任务检索、只读检索诊断和报告失败隔离。
 
 ## 已知边界
 
@@ -106,6 +116,6 @@ python main.py --demo
 - 知识库没有自动过期、定时刷新、来源冲突消解或事实真实性验证；
 - 向量召回质量依赖 Embedding、Chunk 参数和查询表达；
 - 当前引用是证据级而不是 Claim-Level Citation，也不验证证据是否足以支持某一句结论；
-- 当前没有自动化 RAG Evaluation、Recall@K 或 Precision@K；
+- 当前只有 15 条 Query 的人工 RAG 基线，没有自动化 Recall@K、Precision@K、MRR、NDCG 或 LLM-as-a-Judge；
 - 版本清单没有多进程写锁，大规模 Collection 的版本过滤仍需优化；
 - 当前没有 Long-term Memory、Multi-Agent 或自动 Context 检索。

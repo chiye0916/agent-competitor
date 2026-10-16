@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from embedding.base import EmbeddingModel
 from knowledge.chunk import Chunk
+from retrieval.models import RetrievalMatch
 
 
 class ChromaStore:
@@ -24,6 +25,7 @@ class ChromaStore:
         collection_name: str = "competitor_knowledge",
         persist_directory: Path | str | None = None,
         client: Any | None = None,
+        create_if_missing: bool = True,
     ) -> None:
         try:
             import chromadb
@@ -35,7 +37,10 @@ class ChromaStore:
                 client = chromadb.Client()
             else:
                 path = Path(persist_directory)
-                path.mkdir(parents=True, exist_ok=True)
+                if not create_if_missing and not path.exists():
+                    raise RuntimeError(f"知识库目录不存在: {path}")
+                if create_if_missing:
+                    path.mkdir(parents=True, exist_ok=True)
                 client = chromadb.PersistentClient(path=str(path))
         self.embedding_model = embedding_model
         self.client = client
@@ -49,10 +54,21 @@ class ChromaStore:
             else None
         )
         self._version_manifest = self._load_version_manifest()
-        self.collection = client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        if create_if_missing:
+            self.collection = client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+        else:
+            try:
+                self.collection = client.get_collection(name=collection_name)
+            except Exception as exc:
+                raise RuntimeError(f"知识库 Collection 不存在: {collection_name}") from exc
+
+    @property
+    def distance_metric(self) -> str:
+        metadata = getattr(self.collection, "metadata", None) or {}
+        return str(metadata.get("hnsw:space", "l2"))
 
     def _load_version_manifest(self) -> dict[str, Any]:
         empty = {"schema_version": 1, "documents": {}}
@@ -198,6 +214,15 @@ class ChromaStore:
         return len(stale_ids)
 
     def query(self, text: str, top_k: int = 5) -> list[Chunk]:
+        return [match.chunk for match in self.query_with_distances(text, top_k)]
+
+    def query_with_distances(
+        self,
+        text: str,
+        top_k: int = 5,
+    ) -> list[RetrievalMatch]:
+        """Return visible Chunks with raw Chroma distances, without applying a threshold."""
+
         if top_k <= 0:
             raise ValueError("top_k 必须大于 0")
         if not text.strip():
@@ -211,26 +236,38 @@ class ChromaStore:
             # Staged and obsolete versions remain physically present until cleanup.
             # Query all candidates so they cannot crowd active versions out of top_k.
             n_results=collection_count,
-            include=["documents", "metadatas"],
+            include=["documents", "metadatas", "distances"],
         )
         ids = (result.get("ids") or [[]])[0]
         documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
-        chunks: list[Chunk] = []
-        for chunk_id, document, metadata in zip(ids, documents, metadatas):
+        distances = (result.get("distances") or [[]])[0]
+        if len(distances) != len(ids):
+            distances = [None] * len(ids)
+        matches: list[RetrievalMatch] = []
+        for chunk_id, document, metadata, distance in zip(
+            ids,
+            documents,
+            metadatas,
+            distances,
+        ):
             stored = metadata or {}
             decoded = self._decode_metadata(stored)
             document_id = str(stored.get(self._DOCUMENT_ID_KEY, ""))
             if not self._is_query_visible(document_id, decoded):
                 continue
-            chunks.append(
-                Chunk(
-                    id=str(chunk_id),
-                    document_id=document_id,
-                    text=str(document or ""),
-                    metadata=decoded,
+            matches.append(
+                RetrievalMatch(
+                    rank=len(matches) + 1,
+                    distance=float(distance) if distance is not None else None,
+                    chunk=Chunk(
+                        id=str(chunk_id),
+                        document_id=document_id,
+                        text=str(document or ""),
+                        metadata=decoded,
+                    ),
                 )
             )
-            if len(chunks) == top_k:
+            if len(matches) == top_k:
                 break
-        return chunks
+        return matches
