@@ -9,13 +9,15 @@ State 解决的是同一个运行中的连续执行与恢复问题：
 - 当前任务是什么；
 - 计划有哪些步骤、哪些已经完成；
 - 已经获得哪些网页证据；
+- 本次任务实际召回了哪些知识 Evidence；
+- 当前任务使用已有知识还是允许检查最新信息；
 - 已执行到第几轮；
 - 是否发生过 Replan；
 - 最近发生了什么；
 - 哪些动作发生重复；
 - 最终报告是否已经生成。
 
-它不是长期 Memory、对话记忆库、向量数据库或 RAG 索引。
+它不是长期 Memory、对话记忆库或 RAG 索引。第三阶段的 Chroma 由 `retrieve_knowledge` Tool 查询；Tool 只把本次实际召回的 Chunk 快照写为 `retrieved_evidence`。报告成功后的 Pipeline 读取 `state.sources` 作为一次性入库输入，但不会把入库结果回写到 AgentState。
 
 ## 2. `AgentState` 完整字段
 
@@ -36,6 +38,8 @@ State 解决的是同一个运行中的连续执行与恢复问题：
 | `report_path` | `str | None` | 最终报告文件路径 | 成功结束后关联运行状态与报告产物 |
 | `created_at` | UTC ISO 时间 | State 创建时间 | 审计运行开始时间 |
 | `updated_at` | UTC ISO 时间 | 最近保存时间 | 判断持久化状态的新旧；每次 `save()` 时更新 |
+| `knowledge_mode` | `str`，`existing` | 任务级知识策略：`existing` 或 `latest` | 恢复时保持用户是否授权检查最新信息的选择 |
+| `retrieved_evidence` | `list[RetrievedEvidence]`，空列表 | 本次任务实际召回的知识 Chunk 及来源链 | 让后续轮次和报告可使用、引用并审计知识证据 |
 
 ## 3. 嵌套结构
 
@@ -73,8 +77,15 @@ class Source:
 - `content`：`read_web` 获取的网页正文；
 - `retrieved_at`：搜索创建或正文更新的 UTC 时间；
 - `via`：默认 `search_web`，读取正文后更新为 `read_web`。
+- `http_status`：`read_web` 成功响应的 HTTP 状态码；旧 State 缺少该字段时恢复为 `None`。
 
 搜索结果按 URL Upsert：已存在的 URL 只更新摘要，不新增 Source。读取结果同样按精确 URL 更新已有 Source；如果 URL 尚不存在则新增 Source。
+
+### 3.3 `RetrievedEvidence`
+
+`RetrievedEvidence` 位于 `agent/evidence.py`，与 Knowledge Layer 中的 `Chunk` 分层。它保存内部 `E#`、Chunk/Document ID、证据文本、Source URL/标题，以及可用的 Source ID、Content Hash、获取和入库时间。`KnowledgeRetrievalTool` 按 `chunk_id` 去重；同一 Chunk 多次召回不会在 State 中重复增加。
+
+`RetrievedEvidence` 表示“当前任务实际获得的知识证据”，而不是整个知识库。它支持 `to_dict()` / `from_dict()`，随 AgentState 一起保存和恢复。
 
 ## 4. State 的写入时机
 
@@ -91,10 +102,11 @@ class Source:
 
 | 对象 | 内容 | 生命周期 | 用途 |
 |---|---|---|---|
-| `AgentState` / `state.json` | 当前任务、计划、来源、进度、保护字段和近期事件 | 每轮覆盖保存，可恢复 | Runtime 的事实状态 |
+| `AgentState` / `state.json` | 当前任务、计划、网页来源、知识 Evidence、知识模式、进度、保护字段和近期事件 | 每轮覆盖保存，可恢复 | Runtime 的事实状态 |
 | Decision Context | 从 State 选择出的有限模型输入 | 每轮重新构造，不单独落盘 | 决定下一步 Action、评估进度 |
 | Report Context | 面向最终综合的较大证据输入 | Finish 后构造，不单独落盘 | 生成最终报告 |
 | `run.jsonl` | 全部事件逐行追加 | 整个运行历史 | 观察与审计，不用于完整恢复 |
+| `knowledge_ingestion.json` | 入库阶段、逐 Source 评估、版本结果和错误 | 报告成功后独立覆盖，可安全重试 | Knowledge Pipeline 恢复与审计 |
 
 `recent_events` 最多保存 20 条；`ContextBuilder` 实际只取其中最后 6 条，并将每条详情压缩到约 350 字符。完整过程应查看 `run.jsonl`，而不是只看 `state.json`。
 
@@ -105,10 +117,12 @@ class Source:
 `ContextBuilder` 从 State 构造：
 
 - `task`
+- `knowledge_mode` 与对应的决策策略；
 - 完整 `plan`
 - `progress`：轮数、Replan 次数、来源数、被阻止 URL
 - `source_index`：全部来源的精简索引
 - `evidence`：预算内选取的正文或摘要
+- `retrieved_evidence`：预算内选取的当前任务知识 Evidence；
 - 最近 6 个压缩事件
 
 默认总预算为 14,000 字符，单个证据最多 1,800 字符。来源按“疑似官方、已读取、更新时间”排序。
@@ -121,11 +135,12 @@ class Source:
 - 全部来源目录；
 - 已读取正文组成的 `primary_evidence`；
 - 搜索摘要组成的 `supplemental_evidence`；
+- 本次任务召回的知识 Evidence 组成的 `retrieved_evidence`；
 - 固定的四维覆盖要求和报告策略。
 
 默认预算为 70,000 字符，单个正文最多 7,000 字符。全文按内容哈希去重，并按域名组轮换，以减少单一域名占满预算的概率。
 
-报告 Context 只是临时字典，不是持久化的 Memory 或证据数据库。
+报告 Context 只是临时字典，不是持久化的 Memory 或证据数据库。`existing` 模式先加入知识 Evidence，`latest` 模式先加入本次网页证据；这只是预算优先级，不会自动调用工具。
 
 ## 7. Replan 对 State 的影响
 
@@ -144,8 +159,21 @@ class Source:
 - 当前版本未实现跨任务长期 Memory；
 - 当前版本未实现 conversation memory；
 - 当前版本未实现 memory database；
-- 当前版本未实现 vector memory、Embedding 或 RAG；
+- 当前版本未实现 vector memory 或自动 Context RAG；知识库读取由 LLM 选择 Tool，只有实际召回结果作为 Evidence 写入 State，知识写入则在报告完成后独立执行；
 - 当前版本未实现结构化事实表或持久化证据矩阵；
 - 当前版本未实现 State 版本迁移框架；旧状态仅依靠 dataclass 默认字段兼容缺少的新字段。
 
 这些可以作为未来扩展方向，但不属于当前系统能力。
+
+## 9. Source、Document 与 Chunk 的边界
+
+第三阶段新增的 `Document` 和 `Chunk` 本体不属于 `AgentState`，也不会直接写入 `state.json`；当前任务仅保存必要的 `RetrievedEvidence` 快照：
+
+| 类型 | 所属层 | 作用 |
+|---|---|---|
+| `Source` | Agent Runtime | 保存某次任务运行中搜索或读取到的来源，继续用于 Context 和报告 |
+| `Document` | Knowledge Layer | 表示进入知识系统前的完整原始文档，可由 `Document.from_source()` 显式转换 |
+| `Chunk` | Knowledge Layer | 表示切分后用于 Embedding 和 Chroma 索引的文本片段 |
+| `RetrievedEvidence` | Agent Runtime | 表示本次任务实际召回的 Chunk 快照，保留回到 Document/Source URL 的追踪信息 |
+
+新增 Knowledge 类型没有替换或修改 `Source`。真实报告成功后，Pipeline 会评估 `state.sources`，只把具有有效 URL、`read_web` 正文且达到质量阈值的 Source 转为 Document；搜索摘要不会入库。`retrieve_knowledge` 返回的 Chunk 不转成 Source，而是写为独立 Evidence 并参与报告。入库的 `pending/running/completed/partial_failed/failed` 与 AgentState 的研究状态完全分离。

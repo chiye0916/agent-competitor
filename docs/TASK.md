@@ -20,7 +20,9 @@ class AgentState:
 python main.py --task "分析 Cursor、Claude Code、Codex 的产品定位、功能和价格"
 ```
 
-如果既没有提供 `--task`，也没有使用 `--resume` 或 `--demo`，CLI 会返回错误码 2。系统只检查任务是否存在，不对产品数量、研究维度、语言或输出格式做结构化校验。
+如果既没有提供 `--task`，也没有使用 `--resume`、`--demo` 或 `--ingest-existing`，CLI 会返回错误码 2。系统只检查任务是否存在，不对产品数量、研究维度、语言或输出格式做结构化校验。`--ingest-existing` 只重试已完成运行的知识入库，不创建或恢复 Agent 研究轮次。
+
+新任务的 `knowledge_mode` 默认是 `existing`。用户可以使用 `--knowledge-mode latest` 显式授权检查最新信息；如果没有显式参数，CLI 会识别任务中的“最新”“当前”“截至今天”“实时”“检查最新信息”“重新核实”等明确表达。恢复任务时沿用 State 中的模式，也可用同一参数覆盖。
 
 `--demo` 是例外：它会使用固定任务“比较 Alpha 与 Beta 的定位、定价和适用场景”，并配合固定的模型决策和网页夹具验证执行链路。Demo 结果不是实时竞品研究。
 
@@ -46,13 +48,15 @@ python main.py --task "分析 Cursor、Claude Code、Codex 的产品定位、功
 Plan 生成后，每轮 Context 同时包含：
 
 - 原始 `task`；
+- `knowledge_mode` 和对应策略；
 - 全部计划步骤及其状态；
 - 当前轮数、Replan 次数、来源数量和被重复保护阻止的 URL；
 - 全部来源的精简索引；
 - 字符预算内选取的证据；
+- 本次任务实际召回、可追踪到 Chunk/Document/URL 的知识 Evidence；
 - 最近 6 个压缩事件。
 
-LLM 根据这些信息从 `search_web`、`read_web`、`replan`、`finish` 中选择一个 Action。搜索词、URL、用途和目标步骤由 LLM 在 Action 参数中给出。
+真实模式下，LLM 根据这些信息从 `search_web`、`read_web`、`retrieve_knowledge`、`replan`、`finish` 中选择一个 Action。查询词、URL、用途和目标步骤由 LLM 在 Action 参数中给出。`retrieve_knowledge` 用于复用已有知识库，`search_web` 用于知识库缺失或需要最新信息的情况；Runtime 不强制固定调用顺序。`existing` 不会因资料较旧自动搜索，`latest` 也只是授权检查，是否搜索仍由 LLM 判断。
 
 成功执行搜索或读取后，系统调用 `assess_progress()`，让模型根据当前计划、已有证据和最新 Observation 提议可完成的步骤。Runtime 只会更新实际存在且尚未完成的步骤 ID。
 
@@ -77,10 +81,10 @@ LLM 根据这些信息从 `search_web`、`read_web`、`replan`、`finish` 中选
 
 模型通过 `finish` Action 声明研究可以结束，并可提交 `completed_step_ids`。Runtime 当前只做两项直接处理：
 
-1. 至少已有一个 `Source`，否则拒绝 Finish；
+1. 至少已有一个网页 `Source` 或知识 `RetrievedEvidence`，否则拒绝 Finish；
 2. 将 `completed_step_ids` 中匹配现有计划的步骤设为 `completed`。
 
-之后系统构造报告 Context、调用 `write_report()`、写入 `report.md`，并将状态改为 `completed`。
+之后系统构造报告 Context、调用 `write_report()`、写入 `report.md`，并将状态改为 `completed`。真实模式在这些步骤全部成功后，才根据配置调用独立 Knowledge Ingestion Pipeline；入库结果不参与 Finish 决策，失败也不会改变任务的 `completed` 状态。
 
 当前没有独立的任务完成度规则引擎，也没有强制校验“每个竞品 × 每个维度”都已有证据。最终是否足够完成主要依赖 LLM 决策。
 
@@ -92,6 +96,6 @@ LLM 根据这些信息从 `search_web`、`read_web`、`replan`、`finish` 中选
 python main.py --resume artifacts/<run>/state.json --max-rounds 40
 ```
 
-系统会加载原 `task`、Plan、Sources 和进度，并把新事件追加到同目录的 `run.jsonl`。`--max-rounds` 是累计上限；若状态已执行 30 轮并传入 `--max-rounds 40`，最多继续到第 40 轮。
+系统会加载原 `task`、Plan、Sources、RetrievedEvidence、knowledge_mode 和进度，并把新事件追加到同目录的 `run.jsonl`。`--max-rounds` 是累计上限；若状态已执行 30 轮并传入 `--max-rounds 40`，最多继续到第 40 轮。
 
 恢复机制不是任务调度系统，也不提供多个任务之间的排队或切换。

@@ -7,7 +7,33 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent.evidence import RetrievedEvidence
 from storage.logger import utc_now
+
+
+KNOWLEDGE_MODES = {"existing", "latest"}
+LATEST_KNOWLEDGE_MARKERS = (
+    "最新",
+    "当前",
+    "截至今天",
+    "实时",
+    "检查最新信息",
+    "重新核实",
+    "latest",
+    "current",
+    "as of today",
+    "real-time",
+    "revalidate",
+)
+
+
+def infer_knowledge_mode(task: str) -> str:
+    normalized = task.lower()
+    return (
+        "latest"
+        if any(marker.lower() in normalized for marker in LATEST_KNOWLEDGE_MARKERS)
+        else "existing"
+    )
 
 
 @dataclass
@@ -26,6 +52,7 @@ class Source:
     content: str = ""
     retrieved_at: str = field(default_factory=utc_now)
     via: str = "search_web"
+    http_status: int | None = None
 
 
 @dataclass
@@ -43,6 +70,12 @@ class AgentState:
     report_path: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
+    knowledge_mode: str = "existing"
+    retrieved_evidence: list[RetrievedEvidence] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.knowledge_mode not in KNOWLEDGE_MODES:
+            raise ValueError("knowledge_mode 必须是 existing 或 latest")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -52,6 +85,10 @@ class AgentState:
         copy = dict(data)
         copy["plan"] = [PlanStep(**item) for item in copy.get("plan", [])]
         copy["sources"] = [Source(**item) for item in copy.get("sources", [])]
+        copy["retrieved_evidence"] = [
+            RetrievedEvidence.from_dict(item)
+            for item in copy.get("retrieved_evidence", [])
+        ]
         return cls(**copy)
 
     def save(self, path: Path) -> None:
@@ -79,3 +116,15 @@ class AgentState:
                 step.status = "completed"
                 changed.append(step.id)
         return changed
+
+    def add_retrieved_evidence(self, evidence: RetrievedEvidence) -> RetrievedEvidence:
+        for existing in self.retrieved_evidence:
+            if existing.chunk_id == evidence.chunk_id:
+                return existing
+        used_ids = {item.id for item in self.retrieved_evidence}
+        next_index = 1
+        while f"E{next_index}" in used_ids:
+            next_index += 1
+        evidence.id = f"E{next_index}"
+        self.retrieved_evidence.append(evidence)
+        return evidence

@@ -128,6 +128,9 @@ class ResearchTools:
             with urllib.request.urlopen(request, timeout=self.config.request_timeout) as response:
                 content_type = response.headers.get_content_type()
                 charset = response.headers.get_content_charset() or "utf-8"
+                http_status = getattr(response, "status", None)
+                if http_status is None and hasattr(response, "getcode"):
+                    http_status = response.getcode()
                 raw = response.read(2_000_000)
         except (urllib.error.URLError, TimeoutError) as exc:
             raise RuntimeError(f"网页读取失败: {exc}") from exc
@@ -142,7 +145,12 @@ class ResearchTools:
         else:
             raise RuntimeError(f"暂不支持网页类型: {content_type}")
         text = re.sub(r"\s+", " ", html.unescape(text)).strip()
-        return {"url": url, "title": title[:300], "content": text[:50_000]}
+        return {
+            "url": url,
+            "title": title[:300],
+            "content": text[:50_000],
+            "http_status": int(http_status) if http_status is not None else None,
+        }
 
 
 class SearchWebTool(BaseTool):
@@ -205,6 +213,7 @@ class ReadWebTool(BaseTool):
                 source.content = output.get("content", "")
                 source.via = "read_web"
                 source.retrieved_at = utc_now()
+                source.http_status = output.get("http_status")
                 return source.id
         source = Source(
             id=f"S{len(self.state.sources) + 1}",
@@ -212,6 +221,7 @@ class ReadWebTool(BaseTool):
             url=output["url"],
             content=output.get("content", ""),
             via="read_web",
+            http_status=output.get("http_status"),
         )
         self.state.sources.append(source)
         return source.id
@@ -257,8 +267,8 @@ class FinishTool(BaseTool):
         self.state = state
 
     def execute(self, **kwargs: Any) -> dict[str, Any]:
-        if not self.state.sources:
-            raise RuntimeError("尚未收集任何来源，不能 finish")
+        if not self.state.sources and not self.state.retrieved_evidence:
+            raise RuntimeError("尚未收集任何网页来源或知识证据，不能 finish")
         completed = self.state.complete_steps(kwargs.get("completed_step_ids", []))
         return {
             "reason": kwargs["reason"],

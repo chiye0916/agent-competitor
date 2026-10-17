@@ -6,6 +6,8 @@
 
 - `artifacts/demo/run.jsonl` 与 `artifacts/demo/state.json`
 - `artifacts/20261012-101236/run.jsonl` 与 `artifacts/20261012-101236/state.json`
+- `artifacts/knowledge-task-a/run.jsonl`、`state.json` 与 `knowledge_ingestion.json`
+- `artifacts/knowledge-task-b-2/run.jsonl`、`state.json` 与 `knowledge_ingestion.json`
 
 日志时间使用 UTC。本文档中的“当前状态”是根据同一日志内上一轮 `state_change` 和最终 `state.json` 还原的摘要。
 
@@ -240,3 +242,71 @@ Expecting ',' delimiter: line 1 column 1070 (char 1069)
 - 本地真实运行的 `CONTEXT_CHAR_BUDGET` 从 80,000 恢复为默认 14,000，减少决策漂移和格式异常风险。
 
 自动化测试新增了非法 JSON 重试、重试耗尽诊断、Decision 跨轮恢复和不同 URL 累计重复触发 Replan 四类用例。
+
+## 6. 2026-10-15/16 Knowledge Layer 真实端到端验证
+
+本节使用 DeepSeek 对话模型、Voyage AI `voyage-4` Embedding 和本地 Chroma，验证“报告后入库 → 新任务 Tool 检索 → 新资料增量入库”。日志时间为 UTC。
+
+### 6.1 任务 A：首次知识入库
+
+`artifacts/knowledge-task-a/knowledge_ingestion.json` 的最终结果：
+
+| 字段 | 值 |
+|---|---:|
+| `status` | `completed` |
+| `total_sources` | 14 |
+| `accepted` / `rejected` | 3 / 11 |
+| `new` / `failed` | 3 / 0 |
+| `chunks_written` | 31 |
+
+被接受的 S1、S11 和 S12 都是 `read_web` 正文，分别写入 13、2 和 16 个 Chunk。11 个 `search_web` 摘要以 `missing_verified_full_text` 被拒绝，这是准入策略的预期结果。
+
+### 6.2 任务 B：跨任务检索与故障恢复
+
+`artifacts/knowledge-task-b-2/run.jsonl` 使用明确任务“优先查询已有知识，总结并分析 2Cshop 的价格方案与产品定位”。运行结果：
+
+- Round 1–3 连续调用 `retrieve_knowledge`，每次 `result_count=8`，证明任务 A 的 Chunk 可被新任务召回；
+- Round 4–6 继续调用检索，触发 Voyage 未绑定付款账户的 3 RPM 限制，三次记录为 429 `tool_error`；
+- Round 7 改用 `search_web`，Round 8 用 `read_web` 读取官方价格页，Round 9 `finish`；
+- AgentState 最终为 `completed`，生成 13,341 字节的 `report.md`，证明 Tool 限流没有使整个 Agent 失败。
+
+该次运行发生在 Step 4.1 之前；当时最终 `report_context_built` 只包含网页 Source：Primary 为 S3，Supplemental 为 S1、S2、S4、S5。虽然知识 Tool 已成功召回 Chunk，但旧实现不会保存 Evidence，因此未直接进入最终 `ReportContextBuilder`。这是历史运行事实，不代表当前代码行为。
+
+### 6.3 限流后入库重试与幂等验证
+
+报告完成后的首次自动入库因同一 429 限流失败，但没有撤销报告或 `completed` AgentState。等待限流窗口后执行：
+
+```powershell
+python main.py --ingest-existing artifacts\knowledge-task-b-2\state.json
+```
+
+2026-10-15T12:20:59Z 的重试成功：`new=1`、`chunks_written=4`、`failed=0`。2026-10-16T01:21:17Z 再次执行同一命令，结果为 `new=0`、`unchanged=1`、`chunks_written=0`、`failed=0`，证明内容未变时不会重复 Embedding 或写入。
+
+当前 `.knowledge/chroma/competitor_knowledge.versions.json` 有 4 篇活跃文档，Chunk 数为 `13 + 2 + 16 + 4 = 35`。
+
+### 6.4 本次验证确认的后续输入与 Step 4.1 状态
+
+- `retrieve_knowledge` 不在当前重复动作签名中，相同/相近查询在短时间内重复请求 Embedding；
+- Retriever 没有查询缓存、`Retry-After`/429 退避或提供商级限速；
+- Step 4.1 已把成功召回的 Chunk 保存为独立 `RetrievedEvidence`，不会混入 `state.sources`，但会进入当前任务的决策和报告 Context；
+- 通用 Embedding 适配器没有传递 Voyage 建议的 `input_type=query/document`。
+
+Step 4.1 还加入了程序化证据引用和用户主动的 `existing/latest` 模式，但没有修改 Agent Loop 或 Retriever 核心参数。重复查询、429 恢复、Voyage 原生 `input_type` 和召回质量仍属于后续 Step 4.2/4.3 输入。
+
+## 7. 2026-10-16 RAG 人工检索基线
+
+Step 4.2 使用现有 4 篇活跃 Document、35 个 Chunk、Voyage AI `voyage-4` 和 cosine distance，运行 `tests/data/rag_queries.json` 中的 15 条 Query。为适配账户限流，批量验证使用 21 秒间隔；验证脚本没有执行入库、Chunk 写入或版本切换。
+
+13 条有答案 Query 的人工结果：Source Hit@1 为 9/13（69.2%），Hit@3 和 Hit@5 都为 12/13（92.3%）；Answer Sufficiency@1/3/5 分别为 5/13（38.5%）、11/13（84.6%）、12/13（92.3%）。两条无答案 Query 都返回 5 条不足以回答问题的候选。
+
+典型失败包括：第三方旧价格在 Q02/Q13 中排在当前官方价格之前；Q03/Q04/Q09 虽然 Top 1 来源正确，但答案位于相邻 Chunk；Q11 对已入库的 404 页面未能在 Top 5 命中；无答案 Query 因没有阈值仍返回最近邻。完整逐项记录和参数实验建议见 `docs/rag-evaluation.md`。本轮未修改 Top-K、阈值、Chunk Size/Overlap、Embedding、distance metric 或 Metadata Filter，也未引入 Reranker。
+
+完整测试为 48/48 通过；离线 Demo 在临时目录中按原有六轮脚本完成并生成报告，没有触碰工作区现有 `artifacts/demo` 删除状态。
+
+## 8. 2026-10-16 Knowledge Quality Gate 与检索阈值首轮修复
+
+本轮只处理错误页入库和无答案强制最近邻。`read_web`开始保存HTTP status；Pipeline先构造Document，再在Chunk/Embedding前检查非2xx、空正文、明显404/Not Found页和通用错误页。对历史任务A的三个`read_web` Source只读复评，S1/S12通过，含“404错误、找不到页面、返回首页”的S11以`not_found_page`拒绝。现有Collection中的历史S11向量没有自动删除。
+
+Retriever保持Top-K=5、cosine metric、Chunk 500/50和`voyage-4`不变，在Top-K后应用可配置distance上限。当前临时候选为0.50，判断条件是`distance <= 0.50`。真实复测结果：Q01接受5/5；无答案Q14拒绝5/5并返回`no_relevant_knowledge`；边界Q13只接受第三方旧文0.486884，却拒绝正确官方页面0.535300。这证明0.50尚不是最终阈值，也再次确认单一阈值不能修复来源冲突和排序问题。
+
+新增测试覆盖HTTP 404、HTTP 200错误页、空正文、正常页面、正常404教程、相关/不相关/部分阈值、关闭阈值兼容、Tool显式无答案Observation及“不强制Web Search”。完整测试63/63通过，`compileall`通过，`pip check`报告`No broken requirements found`，离线Demo在系统临时目录中按原有6轮流程完成。

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.context import ContextBuilder, ReportContextBuilder
+from agent.evidence import ReportCitationRenderer
 from agent.state import AgentState, PlanStep
 from config.settings import Config
 from llm.backend import LLMBackend, LLMResponseError
@@ -40,6 +41,7 @@ class CompetitorAgent:
         )
         self.context_builder = ContextBuilder(config.context_char_budget)
         self.report_context_builder = ReportContextBuilder(config.report_context_char_budget)
+        self.citation_renderer = ReportCitationRenderer()
         self._bootstrap_guard_state()
 
     @staticmethod
@@ -257,13 +259,29 @@ class CompetitorAgent:
             context_chars=len(json.dumps(report_context, ensure_ascii=False)),
             primary_source_ids=[item["id"] for item in report_context["primary_evidence"]],
             supplemental_source_ids=[item["id"] for item in report_context["supplemental_evidence"]],
+            retrieved_evidence_ids=[
+                item["id"] for item in report_context["retrieved_evidence"]
+            ],
         )
         report = self.llm.write_report(report_context).strip()
         if not report:
             raise RuntimeError("模型返回了空报告")
-        report += "\n\n## 来源\n\n" + "\n".join(
-            f"- [{source.id}] [{source.title}]({source.url})（{source.retrieved_at}）"
-            for source in self.state.sources
+        report, citations = self.citation_renderer.render(report, report_context)
+        self._record(
+            "report_citations_built",
+            citation_count=len(citations),
+            citations=[
+                {
+                    "number": item["number"],
+                    "internal_id": item["internal_id"],
+                    "kind": item["kind"],
+                    "source_id": item.get("source_id"),
+                    "document_id": item.get("document_id"),
+                    "chunk_id": item.get("chunk_id"),
+                    "url": item["url"],
+                }
+                for item in citations
+            ],
         )
         report_path = self.run_dir / "report.md"
         report_path.write_text(report + "\n", encoding="utf-8")

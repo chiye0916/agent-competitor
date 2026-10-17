@@ -39,7 +39,7 @@ class DemoResearchTools(ResearchTools):
     def read_web(self, url: str) -> dict[str, Any]:
         if url not in self.PAGES:
             raise RuntimeError(f"demo fixture 不存在: {url}")
-        return {"url": url, **self.PAGES[url]}
+        return {"url": url, "http_status": 200, **self.PAGES[url]}
 
 
 class DemoLLMBackend:

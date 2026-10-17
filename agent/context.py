@@ -8,6 +8,7 @@ import urllib.parse
 from dataclasses import asdict
 from typing import Any
 
+from agent.evidence import RetrievedEvidence
 from agent.state import AgentState, Source
 from storage.logger import compact
 
@@ -50,6 +51,13 @@ class ContextBuilder:
         ]
         fixed: dict[str, Any] = {
             "task": state.task,
+            "knowledge_mode": state.knowledge_mode,
+            "knowledge_policy": (
+                "用户要求检查最新信息；可以复用已有知识，但应自主判断是否用 search_web/read_web "
+                "核验关键时效性事实。"
+                if state.knowledge_mode == "latest"
+                else "默认使用已有知识；不要仅因资料较旧就自动搜索，资料缺失时仍可自主搜索。"
+            ),
             "plan": [asdict(step) for step in state.plan],
             "progress": {
                 "round": state.round,
@@ -60,8 +68,10 @@ class ContextBuilder:
             "recent_events": recent_events,
             "source_index": source_index,
             "evidence": [],
+            "retrieved_evidence": [],
             "context_policy": (
-                "source_index 列出全部来源；evidence 在预算内优先放近期、已读取且疑似官方的来源；"
+                "source_index 列出全部网页来源；evidence 是本次网页证据；"
+                "retrieved_evidence 是本次任务实际从知识库召回的 Chunk；"
                 "另含最近 6 个压缩事件，不包含完整对话历史。"
             ),
         }
@@ -74,24 +84,71 @@ class ContextBuilder:
             ),
             reverse=True,
         )
-        for source in prioritized:
-            body = source.content or source.snippet
-            item = {
-                "id": source.id,
-                "title": source.title,
-                "url": source.url,
-                "text": body[:1800],
-            }
-            fixed["evidence"].append(item)
+        def add_bounded(key: str, item: dict[str, Any], text_key: str) -> bool:
+            fixed[key].append(item)
             encoded_size = len(json.dumps(fixed, ensure_ascii=False))
             if encoded_size <= self.char_budget:
-                continue
+                return True
             overflow = encoded_size - self.char_budget
-            item["text"] = item["text"][: max(0, len(item["text"]) - overflow - 20)]
-            if not item["text"] or len(json.dumps(fixed, ensure_ascii=False)) > self.char_budget:
-                fixed["evidence"].pop()
-                break
+            item[text_key] = item[text_key][
+                : max(0, len(item[text_key]) - overflow - 20)
+            ]
+            if not item[text_key] or len(json.dumps(fixed, ensure_ascii=False)) > self.char_budget:
+                fixed[key].pop()
+                return False
+            return True
+
+        def add_web_sources() -> None:
+            for source in prioritized:
+                body = source.content or source.snippet
+                if not add_bounded(
+                    "evidence",
+                    {
+                        "id": source.id,
+                        "title": source.title,
+                        "url": source.url,
+                        "retrieved_at": source.retrieved_at,
+                        "text": body[:1800],
+                    },
+                    "text",
+                ):
+                    break
+
+        def add_knowledge_evidence() -> None:
+            for evidence in state.retrieved_evidence:
+                if not add_bounded(
+                    "retrieved_evidence",
+                    self._knowledge_item(evidence, 1800, "text"),
+                    "text",
+                ):
+                    break
+
+        if state.knowledge_mode == "latest":
+            add_web_sources()
+            add_knowledge_evidence()
+        else:
+            add_knowledge_evidence()
+            add_web_sources()
         return fixed
+
+    @staticmethod
+    def _knowledge_item(
+        evidence: RetrievedEvidence,
+        text_limit: int,
+        text_key: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": evidence.id,
+            "chunk_id": evidence.chunk_id,
+            "document_id": evidence.document_id,
+            "source_id": evidence.source_id,
+            "source_title": evidence.source_title,
+            "source_url": evidence.source_url,
+            "content_hash": evidence.content_hash,
+            "retrieved_at": evidence.retrieved_at,
+            "ingested_at": evidence.ingested_at,
+            text_key: evidence.content[:text_limit],
+        }
 
 
 class ReportContextBuilder:
@@ -153,6 +210,7 @@ class ReportContextBuilder:
     def build(self, state: AgentState) -> dict[str, Any]:
         context: dict[str, Any] = {
             "task": state.task,
+            "knowledge_mode": state.knowledge_mode,
             "completed_plan": [asdict(step) for step in state.plan],
             "coverage_requirements": ["定位", "价格", "核心能力", "适用场景"],
             "source_catalog": [
@@ -168,35 +226,59 @@ class ReportContextBuilder:
             ],
             "primary_evidence": [],
             "supplemental_evidence": [],
+            "retrieved_evidence": [],
             "report_policy": (
-                "先按产品和四个维度整理 primary_evidence；优先官方域名和网页正文。"
+                "先按产品和四个维度整理证据；latest 模式优先本次网页正文，existing 模式优先已召回知识。"
                 "supplemental_evidence 仅用于补缺并必须标明证据较弱。不要把 source_catalog 标题当成事实。"
+            ),
+            "citation_policy": (
+                "网页证据只能引用其 S# ID，知识证据只能引用其 E# ID。"
+                "不要输出 URL 或参考来源列表，程序会把实际使用的有效 ID 转换为编号并追加可信来源。"
             ),
         }
         selected_ids: set[str] = set()
-        for source in self._ordered_full_sources(state.sources):
-            item = {
-                "id": source.id,
-                "title": source.title,
-                "url": source.url,
-                "retrieved_at": source.retrieved_at,
-                "likely_official": ContextBuilder._likely_official(source),
-                "content": source.content[: self.per_source_limit],
-            }
-            if not self._try_add(context, "primary_evidence", item):
-                break
-            selected_ids.add(source.id)
 
-        for source in state.sources:
-            if source.id in selected_ids or not source.snippet.strip():
-                continue
-            item = {
-                "id": source.id,
-                "title": source.title,
-                "url": source.url,
-                "retrieved_at": source.retrieved_at,
-                "snippet": source.snippet[:900],
-            }
-            if not self._try_add(context, "supplemental_evidence", item):
-                break
+        def add_web_sources() -> None:
+            for source in self._ordered_full_sources(state.sources):
+                item = {
+                    "id": source.id,
+                    "title": source.title,
+                    "url": source.url,
+                    "retrieved_at": source.retrieved_at,
+                    "likely_official": ContextBuilder._likely_official(source),
+                    "content": source.content[: self.per_source_limit],
+                }
+                if not self._try_add(context, "primary_evidence", item):
+                    break
+                selected_ids.add(source.id)
+
+            for source in state.sources:
+                if source.id in selected_ids or not source.snippet.strip():
+                    continue
+                item = {
+                    "id": source.id,
+                    "title": source.title,
+                    "url": source.url,
+                    "retrieved_at": source.retrieved_at,
+                    "snippet": source.snippet[:900],
+                }
+                if not self._try_add(context, "supplemental_evidence", item):
+                    break
+
+        def add_knowledge_evidence() -> None:
+            for evidence in state.retrieved_evidence:
+                item = ContextBuilder._knowledge_item(
+                    evidence,
+                    self.per_source_limit,
+                    "content",
+                )
+                if not self._try_add(context, "retrieved_evidence", item):
+                    break
+
+        if state.knowledge_mode == "latest":
+            add_web_sources()
+            add_knowledge_evidence()
+        else:
+            add_knowledge_evidence()
+            add_web_sources()
         return context

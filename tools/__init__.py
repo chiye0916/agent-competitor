@@ -2,6 +2,7 @@
 
 from .base import BaseTool, ToolValidationError
 from .demo import DemoLLMBackend, DemoResearchTools
+from .knowledge import KnowledgeRetrievalTool
 from .registry import ToolRegistry, build_default_registry
 from .research import FinishTool, ReadWebTool, ReplanTool, ResearchTools, SearchWebTool
 
@@ -10,6 +11,7 @@ __all__ = [
     "DemoLLMBackend",
     "DemoResearchTools",
     "FinishTool",
+    "KnowledgeRetrievalTool",
     "ReadWebTool",
     "ReplanTool",
     "ResearchTools",

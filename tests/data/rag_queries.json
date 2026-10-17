@@ -1,0 +1,137 @@
+[
+  {
+    "id": "Q01",
+    "category": "exact",
+    "query": "2Cshop 标准版首年费用是多少？",
+    "expected_source_urls": ["https://www.2cshop.net/price.html"],
+    "expected_topics": ["标准版", "首年费用", "4800"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q02",
+    "category": "synonym",
+    "query": "搭建 2Cshop 独立站一年需要多少钱？",
+    "expected_source_urls": ["https://www.2cshop.net/price.html"],
+    "expected_topics": ["价格计划", "年费"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q03",
+    "category": "attribute",
+    "query": "2Cshop 支持多少种语言？",
+    "expected_source_urls": ["https://www.2cshop.com/new/2411.html"],
+    "expected_topics": ["108种语种", "多语言"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q04",
+    "category": "attribute",
+    "query": "2Cshop 是否收取交易佣金？",
+    "expected_source_urls": ["https://www.2cshop.net/price.html", "https://www.2cshop.com/new/2411.html"],
+    "expected_topics": ["免佣金", "不抽佣金"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q05",
+    "category": "attribute",
+    "query": "2Cshop 能否对接支付方式和 ERP？",
+    "expected_source_urls": ["https://www.2cshop.com/new/2411.html"],
+    "expected_topics": ["支付", "ERP对接"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q06",
+    "category": "positioning",
+    "query": "2Cshop 主要适合哪些跨境卖家？",
+    "expected_source_urls": ["https://www.2cshop.com/new/2411.html"],
+    "expected_topics": ["跨境卖家", "没有成熟技术团队"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q07",
+    "category": "comparison",
+    "query": "2Cshop 标准版、旗舰版和独立部署版有什么区别？",
+    "expected_source_urls": ["https://www.2cshop.net/price.html"],
+    "expected_topics": ["标准版", "旗舰版", "独立部署版"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q08",
+    "category": "attribute",
+    "query": "哪个 2Cshop 套餐提供源码和私有部署？",
+    "expected_source_urls": ["https://www.2cshop.net/price.html"],
+    "expected_topics": ["源码", "私有部署", "独立部署版"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q09",
+    "category": "cross_expression",
+    "query": "不懂编程能否通过拖拽搭建多语言商城？",
+    "expected_source_urls": ["https://www.2cshop.com/new/2411.html"],
+    "expected_topics": ["零代码", "可视化拖拽", "多语言"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q10",
+    "category": "interference",
+    "query": "2Cshop 的建站、推广和日常运营能力",
+    "expected_source_urls": ["https://www.2cshop.com/new/2411.html"],
+    "expected_topics": ["网站搭建", "海外推广", "促销运营"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q11",
+    "category": "source_quality",
+    "query": "2Cshop 功能页面当前包含什么内容？",
+    "expected_source_urls": ["https://demo.2cshop.com/function.html"],
+    "expected_topics": ["404", "找不到页面"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": "观察已入库的页面质量，而不是把 404 当成功能证据"}
+  },
+  {
+    "id": "Q12",
+    "category": "cross_expression",
+    "query": "2Cshop 的 Facebook 和 Google 引流服务以及支付集成",
+    "expected_source_urls": ["https://www.2cshop.com/new/2411.html"],
+    "expected_topics": ["Facebook", "Google", "支付"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q13",
+    "category": "exact",
+    "query": "2Cshop 的 4800、9800 和 29800 元分别对应什么版本？",
+    "expected_source_urls": ["https://www.2cshop.net/price.html"],
+    "expected_topics": ["4800", "9800", "29800", "标准版", "旗舰版", "独立部署版"],
+    "expected_answer_status": "present",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": ""}
+  },
+  {
+    "id": "Q14",
+    "category": "no_answer",
+    "query": "2Cshop 是否提供原生 iOS 移动应用？",
+    "expected_source_urls": [],
+    "expected_topics": [],
+    "expected_answer_status": "absent",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": "重点观察无阈值时是否强制返回无关 Chunk"}
+  },
+  {
+    "id": "Q15",
+    "category": "no_answer",
+    "query": "2Cshop 2027 年的退款率是多少？",
+    "expected_source_urls": [],
+    "expected_topics": [],
+    "expected_answer_status": "absent",
+    "manual_evaluation": {"correct_source_rank": null, "hit_at_1": null, "hit_at_3": null, "hit_at_5": null, "ranking_quality": "", "answer_sufficiency": "", "obvious_noise": "", "notes": "重点观察不存在答案时的距离分布和错误匹配"}
+  }
+]

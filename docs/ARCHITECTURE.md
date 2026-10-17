@@ -2,7 +2,7 @@
 
 ## 1. 架构范围
 
-当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 只负责 CLI 参数解析和依赖装配。
+当前系统是一个单进程、同步执行、单 Agent 的 Python CLI 应用。实现按配置、状态、Context、LLM、工具、日志和 Agent 编排职责拆分为普通 Python 模块，没有外部 Agent 编排框架。`main.py` 负责 CLI、依赖装配和报告完成后的入库触发。Knowledge Layer 通过 `retrieve_knowledge` Tool 提供自主检索，并在真实报告成功后通过独立 Pipeline 增量入库；`ContextBuilder` 不做自动检索。
 
 ## 2. 总体流程
 
@@ -20,10 +20,16 @@ flowchart TD
     D --> TR[ToolRegistry<br/>校验 + 分发]
     TR -->|search_web| SW[SearchWebTool<br/>Tavily API]
     TR -->|read_web| RW[ReadWebTool<br/>HTTP + HTMLParser]
+    TR -->|retrieve_knowledge| KT[KnowledgeRetrievalTool]
     TR -->|replan| RP[ReplanTool<br/>替换未完成 PlanStep]
     TR -->|finish| FN[FinishTool]
     SW --> O[Observation]
     RW --> O
+    KT --> RET[Retriever<br/>Top-K 后 distance threshold]
+    RET --> VS[(ChromaStore)]
+    VS --> KT
+    KT --> E[RetrievedEvidence<br/>state.json]
+    E --> O
     RP --> O
     FN --> O
     O --> PA[LLM assess_progress<br/>仅 search/read 成功后]
@@ -32,7 +38,15 @@ flowchart TD
     S -->|下一轮| C
     O -->|finished| RC[ReportContextBuilder]
     RC --> WR[LLM write_report]
-    WR --> R[report.md + 来源清单]
+    WR --> CR[ReportCitationRenderer<br/>校验 ID + 程序生成来源]
+    CR --> R[report.md + 可追溯引用]
+    R --> KIS[KnowledgeIngestionService<br/>仅真实成功运行]
+    KIS --> DOC[Document<br/>含 HTTP status metadata]
+    DOC --> KE[KnowledgeEvaluator<br/>HTTP / 错误页 / 文本质量门]
+    KE -->|accepted| CH[Versioned Chunk]
+    CH --> EM[EmbeddingModel]
+    EM --> VS
+    VS --> VM[原子版本清单<br/>切换可见版本]
     A --> J[run.jsonl + 终端日志]
 ```
 
@@ -59,6 +73,7 @@ competitor-agent/
 ├── agent/
 │   ├── __init__.py
 │   ├── core.py
+│   ├── evidence.py
 │   ├── state.py
 │   └── context.py
 ├── llm/
@@ -71,11 +86,33 @@ competitor-agent/
 │   ├── base.py
 │   ├── registry.py
 │   ├── schemas.py
+│   ├── knowledge.py
 │   ├── research.py
 │   └── demo.py
 ├── config/
 │   ├── __init__.py
 │   └── settings.py
+├── knowledge/
+│   ├── __init__.py
+│   ├── document.py
+│   ├── chunk.py
+│   ├── splitter.py
+│   ├── policy.py
+│   ├── evaluator.py
+│   ├── ingestion.py
+│   └── service.py
+├── embedding/
+│   ├── __init__.py
+│   ├── base.py
+│   └── openai_embedding.py
+├── retrieval/
+│   ├── __init__.py
+│   ├── chroma_store.py
+│   ├── models.py
+│   └── retriever.py
+├── scripts/
+│   ├── __init__.py
+│   └── test_retrieval.py
 └── storage/
     ├── __init__.py
     └── logger.py
@@ -83,23 +120,40 @@ competitor-agent/
 
 | 文件 | 类/对象 | 当前职责 |
 |---|---|---|
-| `main.py` | `parse_args`、`main` | 解析 CLI、创建 Config/LLM/ResearchTools/ToolRegistry/State/Agent 并调用 `run()`；同时转发旧版公开导入名称 |
-| `config/settings.py` | `Config` | 从 `.env` 读取模型、API Key、决策重试次数、轮数、Context 预算和 HTTP 超时 |
-| `agent/state.py` | `PlanStep`、`Source`、`AgentState` | 保存计划步骤、来源和最新可恢复状态，并负责 JSON 序列化 |
+| `main.py` | `parse_args`、`main` | 解析 CLI（包括任务级知识模式）、装配 Agent 与共享知识服务；报告成功后触发自动入库，并支持从已完成 State 单独重试 |
+| `config/settings.py` | `Config` | 从 `.env` 读取 LLM、Embedding、知识库、入库策略、轮数、Context 预算和 HTTP 配置 |
+| `agent/state.py` | `PlanStep`、`Source`、`AgentState` | 保存计划步骤、网页来源、知识模式、当前任务 Evidence 和最新可恢复状态，并负责 JSON 序列化 |
+| `agent/evidence.py` | `RetrievedEvidence`、`ReportCitationRenderer` | 表示本次任务实际召回的知识证据；校验内部 ID、过滤非证据 URL，并生成可追溯引用 |
 | `agent/context.py` | `ContextBuilder`、`ReportContextBuilder` | 将 State 转换为有限决策 Context 或较丰富的报告 Context，不调用 LLM |
 | `agent/core.py` | `CompetitorAgent` | 编排组件，通过 Registry 执行 Action，保持原有 Agent Loop、状态持久化和报告落盘 |
 | `llm/backend.py` | `LLMBackend`、`LLMResponseError` | 规定五类 LLM 能力接口，并提供可恢复响应格式错误类型 |
 | `llm/openai_backend.py` | `OpenAIBackend` | 使用 OpenAI SDK Chat Completions 实现 `LLMBackend`；对缺失 Tool Call 或非法参数 JSON 做有限重试 |
 | `llm/prompts.py` | 提示词常量 | 集中保存 OpenAI 后端使用的五类提示词 |
 | `tools/base.py` | `BaseTool`、`ToolValidationError` | 定义统一 Tool 接口、生成单个 Function Schema 并执行轻量输入校验 |
-| `tools/registry.py` | `ToolRegistry`、`build_default_registry` | 注册 Tool、动态汇总 Schema、校验并分发执行；组装四个默认工具 |
-| `tools/schemas.py` | 描述与输入 Schema 常量 | 保存四个内置 Tool 的参数契约，不再维护静态工具列表 |
+| `tools/registry.py` | `ToolRegistry`、`build_default_registry` | 注册 Tool、动态汇总 Schema、校验并分发执行；真实模式传入 Retriever 时组装五个工具 |
+| `tools/schemas.py` | 描述与输入 Schema 常量 | 保存五个内置 Tool 的参数契约，不再维护静态工具列表 |
+| `tools/knowledge.py` | `KnowledgeRetrievalTool` | 把 `retrieve_knowledge` 暴露给 LLM，把 Chunk 转为当前任务 Evidence，并返回带来源元数据的统一 Observation |
 | `tools/research.py` | `SearchWebTool`、`ReadWebTool`、`ReplanTool`、`FinishTool`、`ResearchTools` | 实现四个可执行 Tool；底层研究客户端负责 Tavily、URL 安全检查和网页读取 |
 | `tools/demo.py` | `DemoLLMBackend`、`DemoResearchTools` | 提供固定动作脚本和 Alpha/Beta 离线网页夹具 |
 | `storage/logger.py` | `RunLogger`、`utc_now`、`compact` | 将事件追加到 `run.jsonl`、输出压缩终端日志，并提供时间/压缩辅助函数 |
+| `knowledge/document.py` | `Document` | 表示可序列化的原始知识文档，并提供从 `Source` 转换的兼容入口 |
+| `knowledge/chunk.py` | `Chunk` | 表示携带文档 ID 和元数据的可序列化文本片段 |
+| `knowledge/splitter.py` | `TextSplitter` | 使用可配置字符窗口和重叠量把 Document 切分为 Chunk |
+| `knowledge/policy.py` | `KnowledgePolicy` | 保存最小正文长度等确定性准入阈值 |
+| `knowledge/evaluator.py` | `KnowledgeEvaluator`、`EvaluationResult` | 在切分前评估 Document 的 HTTP 状态、错误页特征和文本质量，返回可解释结果，不访问 Chroma |
+| `knowledge/ingestion.py` | `KnowledgeIngestionPipeline` | 规范化 URL/正文、识别版本、切分、Embedding、stage、版本切换并汇总结果 |
+| `knowledge/service.py` | `KnowledgeIngestionService` | 隔离报告完成边界和入库失败，写入完成或错误日志 |
+| `embedding/base.py` | `EmbeddingModel` | 定义单文本和批量文本向量化的提供商无关接口 |
+| `embedding/openai_embedding.py` | `OpenAIEmbedding` | 使用独立 Embedding API 配置（可回退到 LLM 配置），通过 OpenAI SDK 批量生成向量 |
+| `retrieval/chroma_store.py` | `ChromaStore` | 管理 Chroma、分阶段版本写入、原子版本清单、旧版本过滤与相似度查询；诊断接口可保留原始 distance |
+| `retrieval/models.py` | `RetrievalMatch`、`RetrievalDiagnostics` | 表示原始排名、Chunk、distance 及阈值接受/拒绝诊断 |
+| `retrieval/retriever.py` | `Retriever` | 在 Chroma Top-K 后按可配置 distance 上限过滤，并为 Tool/只读脚本提供诊断结果 |
+| `scripts/test_retrieval.py` | 只读 CLI | 对现有 Collection 执行单条或测试集检索，展示来源链和 distance，并核对逻辑快照未改变 |
 | 各目录 `__init__.py` | 包导出 | 声明 Python 包并导出主要公共类型 |
 
-当前不存在 Scheduler、Planner 服务、Memory 服务、RAG 服务或 Multi-Agent Coordinator 等独立组件。
+当前不存在 Scheduler、Planner 服务、自动 Context RAG 服务或 Multi-Agent Coordinator。真实模式在 CLI 装配阶段让 Retriever 和 Ingestion Pipeline 共享同一 ChromaStore；Agent Core 仍只面向 Tool Registry，不包含入库分支。Demo 不装配知识服务，保持原有固定六轮行为且不污染真实知识库。
+
+RAG 人工验证脚本是 Agent 运行链之外的诊断入口。它以 `create_if_missing=False` 打开已有 Collection，只调用 `Retriever.query_with_distances()`；原有 Tool 继续调用 `Retriever.query()` 并接收 `Chunk`，因此 Agent Observation 和行为没有变化。
 
 ## 4. LLM 与 Agent Runtime 的职责区别
 
@@ -167,12 +221,13 @@ stateDiagram-v2
 
 - `source_catalog` 列出全部来源；
 - `primary_evidence` 放已读取的正文；
+- `retrieved_evidence` 放本次任务中实际由 Tool 召回并持久化的知识 Chunk；
 - 相同正文按 SHA-256 去重；
 - 来源按基础域名分组并轮换加入；
 - 单个正文最多 7,000 字符；
 - 剩余预算用于 `supplemental_evidence` 搜索摘要，每项最多 900 字符。
 
-这两个 Builder 都直接操作普通 Python 字典，没有向量检索、语义检索或 Context 数据库。
+这两个 Builder 都直接操作普通 Python 字典，不会自行发起向量检索、语义检索或 Web Search。只有 LLM 选择 `retrieve_knowledge` 后已写入 State 的 Evidence 才能进入 Context。
 
 ## 8. Tool Calling 如何工作
 
@@ -189,7 +244,7 @@ stateDiagram-v2
 }
 ```
 
-`CompetitorAgent._execute()` 只把 `name` 和 `arguments` 交给 `ToolRegistry.execute()`。Registry 查找工具、根据同一 Tool 的 `input_schema` 校验参数，再调用 `tool.execute(**arguments)`。Tool 只返回自身 Observation；Registry 根据 Tool 的 `ends_run` 元数据统一返回 `(ends_run, observation)`，默认只有 `FinishTool` 将其设为 `True`。Function Schema 声明 `strict: true`，同时仍保留 Runtime 校验。非法参数或未知名称会由 Agent 原有错误路径记录为 `tool_error`，不会终止整个循环。
+`CompetitorAgent._execute()` 只把 `name` 和 `arguments` 交给 `ToolRegistry.execute()`。Registry 查找工具、根据同一 Tool 的 `input_schema` 校验参数，再调用 `tool.execute(**arguments)`。Tool 只返回自身 Observation；Registry 根据 Tool 的 `ends_run` 元数据统一返回 `(ends_run, observation)`，默认只有 `FinishTool` 将其设为 `True`。现有四个 Tool 保持严格 Schema；`retrieve_knowledge` 因 `top_k` 是带默认值的可选参数而使用非严格 Schema，同时仍保留 Runtime 校验。非法参数或未知名称会由 Agent 原有错误路径记录为 `tool_error`，不会终止整个循环。
 
 如果模型返回的 `function.arguments` 不是合法 JSON，`OpenAIBackend` 会在请求中加入格式纠正提示后重试。默认允许 2 次额外重试；全部失败后抛出 `LLMResponseError`。Runtime 将其记录为 `decision_error`，日志只保存参数长度及最多 600 字符的首尾摘要，随后保存 State 并进入下一轮。该异常发生在 Registry 之前，不属于 `tool_error`。
 
@@ -205,7 +260,7 @@ stateDiagram-v2
 
 1. 解析 URL 并限制为 HTTP(S)；
 2. DNS 解析主机，拒绝非公网 IP；
-3. 使用 `urllib.request` 请求最多 2 MB；
+3. 使用 `urllib.request` 请求最多 2 MB，并保存成功响应的 HTTP status；
 4. 对 HTML 使用 `VisibleTextParser` 提取文本；
 5. 规范空白并截断到 50,000 字符。
 
@@ -245,15 +300,19 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 
 模型选择 `finish` 后：
 
-1. Runtime 检查至少有一个 Source；
+1. Runtime 检查至少有一个网页 Source 或知识 Evidence；
 2. 更新模型声明完成的步骤；
 3. 退出 Agent Loop；
 4. 构造 Report Context；
 5. 调用 LLM 写报告；
-6. 追加全部来源 Markdown 列表；
-7. 写 `report.md`，更新 State 并记录完成日志。
+6. Runtime 只接受报告 Context 中真实存在且被模型写入正文的 `[S#]` / `[E#]`；
+7. 有效内部 ID 按首次出现顺序转换为数字引用，来源 URL 和时间由程序从 Source/Evidence 元数据生成；
+8. 写 `report.md`，记录 `report_citations_built`，更新 State 并记录 `run_completed`；
+9. 真实模式且 `KNOWLEDGE_AUTO_INGEST=true` 时，在 Agent 返回后执行独立入库。
 
-报告生成不是另一个 Agent，也没有独立的审稿循环。
+入库不位于 Agent Loop 内。失败时记录 `ingestion_error` 和独立状态，不回滚报告、不把 AgentState 从 `completed` 改为 `failed`。报告生成不是另一个 Agent，也没有独立的审稿循环。
+
+新任务的 `knowledge_mode` 默认为 `existing`；可用 `--knowledge-mode latest` 显式覆盖，也可由任务中的明确新鲜度词触发。该字段随 State 持久化并进入两种 Context。`latest` 允许 LLM 自主使用 Web Tool 核验时效事实，但 Runtime 不按证据年龄自动调用工具、不刷新知识库，也不规定固定的 RAG → Search → Read 顺序。
 
 ## 12. 配置与依赖
 
@@ -265,22 +324,32 @@ Replan 只保留已完成步骤，不保留被替换的 pending 步骤到当前 
 | `LLM_DECISION_RETRIES` | Tool Call 缺失或参数 JSON 非法时的额外重试次数，默认 2 |
 | `LLM_MODEL` | `gpt-4.1-mini` |
 | `LLM_BASE_URL` | 可选 OpenAI 兼容服务地址 |
+| `EMBEDDING_API_KEY` | 可选独立 Embedding 服务 Key；留空时回退到 LLM Key |
+| `EMBEDDING_BASE_URL` | 可选独立 Embedding 服务地址；留空时回退到 `LLM_BASE_URL` |
+| `EMBEDDING_MODEL` | `text-embedding-3-small`，供 `retrieve_knowledge` 查询向量化使用 |
+| `KNOWLEDGE_DB_PATH` | `.knowledge/chroma`，真实模式的持久化 Chroma 路径 |
+| `KNOWLEDGE_COLLECTION` | `competitor_knowledge` |
+| `KNOWLEDGE_AUTO_INGEST` | `true`，报告成功后自动执行增量入库 |
+| `KNOWLEDGE_MIN_CONTENT_CHARS` | `200`，已读取正文的最低有效字符数 |
+| `KNOWLEDGE_CHUNK_SIZE` | `500` |
+| `KNOWLEDGE_CHUNK_OVERLAP` | `50` |
+| `RAG_RELEVANCE_THRESHOLD` | `0.50`，cosine distance 上限临时候选；`none` 关闭 |
 | `TAVILY_API_KEY` | 真实搜索必需 |
 | `MAX_ROUNDS` | `12` |
 | `CONTEXT_CHAR_BUDGET` | `14000` |
 | `REPORT_CONTEXT_CHAR_BUDGET` | `70000` |
 | `HTTP_TIMEOUT` | `20` 秒 |
 
-第三方 Python 依赖只有 `openai` 和 `python-dotenv`；搜索和网页读取使用标准库 `urllib`。
+第三方 Python 依赖包括 `openai`、`python-dotenv` 和 `chromadb`；搜索和网页读取使用标准库 `urllib`。
 
 ## 13. 当前部署形态与边界
 
 - 单机 CLI、同步执行；
-- State 使用本地 JSON 文件，没有数据库事务或并发写保护；
+- State 和知识版本清单使用本地 JSON 文件，没有多进程并发写保护；
 - Log 使用本地 JSONL 追加，没有集中式日志系统；
 - JSONL 没有代码版本和单次 CLI invocation ID，且 `progress_assessment` 事件本身不含轮次字段；
 - 没有服务端 API、Web UI、鉴权或多租户隔离；
 - 没有异步 Worker 或分布式执行；
-- 没有长期 Memory、RAG 或 Multi-Agent。
+- 没有自动 Context RAG、自动知识刷新、Claim-Level Citation、事实可信度判断、自动化 RAG Evaluation、长期 Memory 或 Multi-Agent；当前阈值0.50只是人工基线导出的临时候选，自动入库只发生在真实报告成功之后。
 
 上述均可作为未来扩展方向，但不属于当前架构。
